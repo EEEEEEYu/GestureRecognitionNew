@@ -70,10 +70,12 @@ class Mamba2Block(nn.Module):
         d_conv: int = 4,
         expand: int = 2,
         dropout: float = 0.1,
+        use_checkpoint: bool = False,
     ):
         super().__init__()
         
         self.norm = nn.LayerNorm(d_model)
+        self.use_checkpoint = use_checkpoint
         
         self.mamba = Mamba2(
             d_model=d_model,
@@ -84,6 +86,13 @@ class Mamba2Block(nn.Module):
         
         self.dropout = nn.Dropout(dropout)
     
+    def _forward_impl(self, x):
+        """Actual forward implementation."""
+        x = self.norm(x)
+        x = self.mamba(x)
+        x = self.dropout(x)
+        return x
+    
     def forward(self, x):
         """
         Args:
@@ -92,9 +101,14 @@ class Mamba2Block(nn.Module):
             [batch, length, d_model]
         """
         residual = x
-        x = self.norm(x)
-        x = self.mamba(x)
-        x = self.dropout(x)
+        
+        if self.use_checkpoint and self.training:
+            # Use gradient checkpointing to save memory
+            from torch.utils.checkpoint import checkpoint
+            x = checkpoint(self._forward_impl, x, use_reentrant=False)
+        else:
+            x = self._forward_impl(x)
+        
         return x + residual
 
 
@@ -114,6 +128,7 @@ class MultiDirectionalSSM(nn.Module):
         expand: int = 2,
         dropout: float = 0.1,
         num_layers: int = 2,
+        use_checkpoint: bool = False,
     ):
         super().__init__()
         
@@ -124,7 +139,7 @@ class MultiDirectionalSSM(nn.Module):
         self.direction_models = nn.ModuleDict()
         for order_name in self.order_names:
             layers = nn.ModuleList([
-                Mamba2Block(d_model, d_state, d_conv, expand, dropout)
+                Mamba2Block(d_model, d_state, d_conv, expand, dropout, use_checkpoint)
                 for _ in range(num_layers)
             ])
             self.direction_models[order_name] = layers
@@ -139,25 +154,17 @@ class MultiDirectionalSSM(nn.Module):
     
     def forward(self, vectors, event_coords):
         """
-        Process vectors in multiple directions.
+        Process vectors in multiple directions with explicit batch dimension.
         
         Args:
-            vectors: [length, d_model] complex or real tensor
+            vectors: [batch, length, d_model] tensor (typically batch=1)
             event_coords: [length, 4] numpy array with [x, y, t, p]
         
         Returns:
-            [length, d_model] tensor after multi-directional processing
+            [batch, length, d_model] tensor after multi-directional processing
         """
-        # Convert complex to real if needed
-        if vectors.is_complex():
-            # Stack real and imaginary parts
-            vectors_real = torch.cat([vectors.real, vectors.imag], dim=-1)
-        else:
-            vectors_real = vectors
-        
-        # Add batch dimension if needed
-        if vectors_real.dim() == 2:
-            vectors_real = vectors_real.unsqueeze(0)  # [1, length, d_model]
+        # vectors should already be [B, L, C] from caller
+        batch_size = vectors.shape[0]
         
         # Process in each direction
         direction_outputs = []
@@ -165,10 +172,10 @@ class MultiDirectionalSSM(nn.Module):
         for order_name in self.order_names:
             # Get ordering indices
             indices = self.ordering.get_ordering(event_coords, order_name)
-            indices_tensor = torch.from_numpy(indices).to(vectors_real.device)
+            indices_tensor = torch.from_numpy(indices).to(vectors.device)
             
-            # Reorder vectors
-            x = vectors_real[:, indices_tensor, :]
+            # Reorder vectors: [B, L, C] → [B, L_reordered, C]
+            x = vectors[:, indices_tensor, :]
             
             # Pass through Mamba2 layers
             for layer in self.direction_models[order_name]:
@@ -180,13 +187,13 @@ class MultiDirectionalSSM(nn.Module):
             
             direction_outputs.append(x)
         
-        # Concatenate all directions
-        multi_dir = torch.cat(direction_outputs, dim=-1)  # [1, length, d_model * 6]
+        # Concatenate all directions: [B, L, C*6]
+        multi_dir = torch.cat(direction_outputs, dim=-1)
         
-        # Fuse directions
-        fused = self.fusion(multi_dir)  # [1, length, d_model]
+        # Fuse directions: [B, L, C*6] → [B, L, C]
+        fused = self.fusion(multi_dir)
         
-        return fused.squeeze(0)  # [length, d_model]
+        return fused
 
 
 class SparseHilbertSSM(nn.Module):
@@ -205,18 +212,21 @@ class SparseHilbertSSM(nn.Module):
         encoding_dim: int = 64,
         hidden_dim: int = 256,
         num_classes: int = 11,
-        num_ssm_layers: int = 3,
+        num_layers: int = 3,  # Renamed from num_ssm_layers
         d_state: int = 64,
         d_conv: int = 4,
         expand: int = 2,
         dropout: float = 0.2,
         pooling_scales: List[int] = [1, 2, 4],
+        use_checkpoint: bool = True,  # Enable by default for memory efficiency
+        input_meta: dict = None,  # Optional metadata (not used, just for config compat)
     ):
         super().__init__()
         
         self.encoding_dim = encoding_dim
         self.hidden_dim = hidden_dim
         self.num_classes = num_classes
+        self.use_checkpoint = use_checkpoint
         
         # Input projection: complex embeddings (2 * encoding_dim) → hidden_dim
         self.input_proj = nn.Sequential(
@@ -233,7 +243,8 @@ class SparseHilbertSSM(nn.Module):
             d_conv=d_conv,
             expand=expand,
             dropout=dropout,
-            num_layers=num_ssm_layers,
+            num_layers=num_layers,
+            use_checkpoint=use_checkpoint,
         )
         
         # Multi-scale pooling
@@ -301,7 +312,7 @@ class SparseHilbertSSM(nn.Module):
     
     def forward_single(self, vectors, event_coords):
         """
-        Process a single sample.
+        Process a single sample with explicit batch dimension.
         
         Args:
             vectors: [length, encoding_dim] complex tensor
@@ -311,18 +322,26 @@ class SparseHilbertSSM(nn.Module):
             logits: [num_classes]
         """
         # Input projection
-        # Stack real and imaginary parts
-        x = torch.cat([vectors.real, vectors.imag], dim=-1)  # [length, 2 * encoding_dim]
-        x = self.input_proj(x)  # [length, hidden_dim]
+        # Stack real and imaginary parts: [L, encoding_dim] → [L, 2*encoding_dim]
+        x = torch.cat([vectors.real, vectors.imag], dim=-1)
         
-        # Multi-directional SSM
-        x = self.ssm(x, event_coords)  # [length, hidden_dim]
+        # Add explicit batch dimension: [L, 2*encoding_dim] → [1, L, 2*encoding_dim]
+        x = x.unsqueeze(0)
         
-        # Multi-scale pooling
-        pooled = self.multi_scale_pool(x)  # [pooled_dim]
+        # Input projection: [1, L, 2*encoding_dim] → [1, L, hidden_dim]
+        x = self.input_proj(x)
         
-        # Classification
-        logits = self.classifier(pooled)  # [num_classes]
+        # Multi-directional SSM: [1, L, hidden_dim] → [1, L, hidden_dim]
+        x = self.ssm(x, event_coords)
+        
+        # Remove batch dimension: [1, L, hidden_dim] → [L, hidden_dim]
+        x = x.squeeze(0)
+        
+        # Multi-scale pooling: [L, hidden_dim] → [pooled_dim]
+        pooled = self.multi_scale_pool(x)
+        
+        # Classification: [pooled_dim] → [num_classes]
+        logits = self.classifier(pooled)
         
         return logits
     
@@ -343,9 +362,13 @@ class SparseHilbertSSM(nn.Module):
         
         logits_list = []
         
-        for vectors, coords in zip(vectors_list, coords_list):
+        for i, (vectors, coords) in enumerate(zip(vectors_list, coords_list)):
             logits = self.forward_single(vectors, coords)
             logits_list.append(logits)
+            
+            # Clear GPU cache between samples to prevent OOM
+            if torch.cuda.is_available() and i % 4 == 3:  # Every 4 samples
+                torch.cuda.empty_cache()
         
         return torch.stack(logits_list)  # [batch_size, num_classes]
 
@@ -365,4 +388,5 @@ def create_sparse_hilbert_ssm(config):
         expand=model_args.get('expand', 2),
         dropout=model_args.get('dropout', 0.2),
         pooling_scales=model_args.get('pooling_scales', [1, 2, 4]),
+        use_checkpoint=model_args.get('use_checkpoint', True),
     )

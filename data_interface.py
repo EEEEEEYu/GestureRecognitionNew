@@ -37,6 +37,16 @@ class DataInterface(pl.LightningDataModule):
 
     # Lightning hook function, override to implement loading train dataset
     def train_dataloader(self):
+        # Check if dataset has a custom collate_fn (e.g., DVSGesturePrecomputed)
+        collate_fn = None
+        if hasattr(self.train_set, 'collate_fn'):
+            collate_fn = self.train_set.collate_fn
+        elif 'collate_fn' in dir(importlib.import_module('data.' + self.dataset_cfg.file_name)):
+            # Try to import from module
+            module = importlib.import_module('data.' + self.dataset_cfg.file_name)
+            if hasattr(module, 'collate_fn'):
+                collate_fn = module.collate_fn
+        
         return DataLoader(
             dataset=self.train_set,
             batch_size=self.dataloader_cfg.batch_size,
@@ -46,10 +56,20 @@ class DataInterface(pl.LightningDataModule):
             pin_memory=self.dataloader_cfg.pin_memory,
             multiprocessing_context=self.dataloader_cfg.multiprocessing_context,
             drop_last=self.dataloader_cfg.drop_last,
+            collate_fn=collate_fn,
         )
 
     # Lightning hook function, override to implement loading validation dataset
     def val_dataloader(self):
+        # Check if dataset has a custom collate_fn
+        collate_fn = None
+        if hasattr(self.validation_set, 'collate_fn'):
+            collate_fn = self.validation_set.collate_fn
+        elif 'collate_fn' in dir(importlib.import_module('data.' + self.dataset_cfg.file_name)):
+            module = importlib.import_module('data.' + self.dataset_cfg.file_name)
+            if hasattr(module, 'collate_fn'):
+                collate_fn = module.collate_fn
+        
         test_batch = self.dataloader_cfg.test_batch_size or self.dataloader_cfg.batch_size
         return DataLoader(
             dataset=self.validation_set,
@@ -60,10 +80,20 @@ class DataInterface(pl.LightningDataModule):
             pin_memory=self.dataloader_cfg.pin_memory,
             multiprocessing_context=self.dataloader_cfg.multiprocessing_context,
             drop_last=self.dataloader_cfg.drop_last,
+            collate_fn=collate_fn,
         )
 
     # Lightning hook function, override to implement loading test dataset
     def test_dataloader(self):
+        # Check if dataset has a custom collate_fn
+        collate_fn = None
+        if hasattr(self.test_set, 'collate_fn'):
+            collate_fn = self.test_set.collate_fn
+        elif 'collate_fn' in dir(importlib.import_module('data.' + self.dataset_cfg.file_name)):
+            module = importlib.import_module('data.' + self.dataset_cfg.file_name)
+            if hasattr(module, 'collate_fn'):
+                collate_fn = module.collate_fn
+        
         test_batch = self.dataloader_cfg.test_batch_size or self.dataloader_cfg.batch_size
         return DataLoader(
             dataset=self.test_set,
@@ -74,23 +104,42 @@ class DataInterface(pl.LightningDataModule):
             pin_memory=self.dataloader_cfg.pin_memory,
             multiprocessing_context=self.dataloader_cfg.multiprocessing_context,
             drop_last=self.dataloader_cfg.drop_last,
+            collate_fn=collate_fn,
         )
     
     @staticmethod
-    def filter_init_args(cls, config_dict):
+    def filter_init_args(cls, config_dict, purpose='train'):
         """
         Checks if config_dict has all required arguments for cls.__init__
         """
-        init_args = dict()
-        for name in inspect.signature(cls.__init__).parameters.keys():
-            # Skip 'self', '*args', '**kwargs' and parameters with defaults
-            if name not in ('self', 'purpose'):
-                init_args[name] = config_dict[name]
-        provided_keys = set(config_dict.keys())
-        missing_keys = init_args.keys() - provided_keys
         
-        if missing_keys:
-            raise ValueError(f"In dataset initialization, found missing config keys for {cls.__name__}: {missing_keys}")
+        init_args = dict()
+        sig = inspect.signature(cls.__init__)
+        
+        for name, param in sig.parameters.items():
+            # Skip 'self' and 'purpose' (passed separately)
+            if name in ('self', 'purpose'):
+                continue
+            
+            # Check if parameter has a default value
+            has_default = param.default != inspect.Parameter.empty
+            
+            if name in config_dict:
+                init_args[name] = config_dict[name]
+            elif has_default:
+                # Parameter has default, don't need it in config
+                pass
+            else:
+                # Required parameter missing
+                raise ValueError(f"Missing required parameter '{name}' for {cls.__name__}")
+        
+        # Special handling for ratio_of_vectors (DVSGesture specific)
+        if 'ratio_of_vectors' in sig.parameters and 'ratio_of_vectors' not in init_args:
+            # Map train_ratio_of_vectors / val_ratio_of_vectors to ratio_of_vectors
+            if purpose == 'train' and 'train_ratio_of_vectors' in config_dict:
+                init_args['ratio_of_vectors'] = config_dict['train_ratio_of_vectors']
+            elif purpose in ('validation', 'test') and 'val_ratio_of_vectors' in config_dict:
+                init_args['ratio_of_vectors'] = config_dict['val_ratio_of_vectors']
         
         return init_args
 
@@ -111,9 +160,12 @@ class DataInterface(pl.LightningDataModule):
         # If you want to enable recursive validation for every keyword including nested ones, define them as template 
         # in config schema instead of using raw dictionary.
         # We assume that dataset_kwargs is a superset of data_class's init arg set.
-        filtered_dataset_kwargs = self.filter_init_args(cls=data_class, config_dict=dataset_kwargs)
-        train_set = data_class(**filtered_dataset_kwargs, purpose='train')
-        validation_set = data_class(**filtered_dataset_kwargs, purpose='validation')
-        test_set = data_class(**filtered_dataset_kwargs, purpose='test')
+        filtered_train_kwargs = self.filter_init_args(cls=data_class, config_dict=dataset_kwargs, purpose='train')
+        filtered_val_kwargs = self.filter_init_args(cls=data_class, config_dict=dataset_kwargs, purpose='validation')
+        filtered_test_kwargs = self.filter_init_args(cls=data_class, config_dict=dataset_kwargs, purpose='test')
+        
+        train_set = data_class(**filtered_train_kwargs, purpose='train')
+        validation_set = data_class(**filtered_val_kwargs, purpose='validation')
+        test_set = data_class(**filtered_test_kwargs, purpose='test')
 
         return train_set, validation_set, test_set

@@ -63,14 +63,24 @@ class ModelInterface(pl.LightningModule):
     # 3. If sync_dist=True, logger will average metrics across devices. This introduces additional communication overhead, and not suggested for large metric tensors.
     # We can also define customized metrics aggregator for incremental step-level aggregation(to be merged into epoch-level metrics).
     def training_step(self, batch, batch_idx):
-        train_input, train_labels = batch
-        train_out_logits = self(train_input)
-        train_loss = self.loss_function(train_out_logits, train_labels, 'train')
+        # DVSGesture batch format: dict with 'vectors', 'event_coords', 'labels'
+        train_labels = batch['labels']
+        train_out_logits = self(batch)
+        
+        # Get batch size from labels
+        batch_size = train_labels.shape[0]
+        
+        # Compute loss with explicit batch_size
+        train_loss = self.loss_function(train_out_logits, train_labels, 'train', batch_size)
 
+        # Compute accuracy metrics
         train_step_top1_acc = multiclass_accuracy(train_out_logits, train_labels, num_classes=self.num_classes, average='micro', top_k=1)
-        train_step_top5_acc = multiclass_accuracy(train_out_logits, train_labels, num_classes=self.num_classes, average='micro', top_k=5)
-        self.log('train_top1_acc', value=train_step_top1_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=train_input.shape[0])
-        self.log('train_top5_acc', value=train_step_top5_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=train_input.shape[0])
+        self.log('train_top1_acc', value=train_step_top1_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=batch_size)
+        
+        # Only compute top-3 for DVSGesture (11 classes)
+        if self.num_classes >= 3:
+            train_step_top3_acc = multiclass_accuracy(train_out_logits, train_labels, num_classes=self.num_classes, average='micro', top_k=3)
+            self.log('train_top3_acc', value=train_step_top3_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=batch_size)
 
         train_step_output = {
             'loss': train_loss,
@@ -82,13 +92,24 @@ class ModelInterface(pl.LightningModule):
 
     # Caution: self.model.eval() is invoked and this function executes within a <with torch.no_grad()> context
     def validation_step(self, batch, batch_idx):
-        val_input, val_labels = batch
-        val_out_logits = self(val_input)
-        val_loss = self.loss_function(val_out_logits, val_labels, 'val')
+        # DVSGesture batch format: dict with 'vectors', 'event_coords', 'labels'
+        val_labels = batch['labels']
+        val_out_logits = self(batch)
+        
+        # Get batch size from labels
+        batch_size = val_labels.shape[0]
+        
+        # Compute loss with explicit batch_size
+        val_loss = self.loss_function(val_out_logits, val_labels, 'val', batch_size)
+        
+        # Compute accuracy metrics
         val_step_top1_acc = multiclass_accuracy(val_out_logits, val_labels, num_classes=self.num_classes, average='micro', top_k=1)
-        val_step_top5_acc = multiclass_accuracy(val_out_logits, val_labels, num_classes=self.num_classes, average='micro', top_k=5)
-        self.log('val_top1_acc', value=val_step_top1_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=val_input.shape[0])
-        self.log('val_top5_acc', value=val_step_top5_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=val_input.shape[0])
+        self.log('val_top1_acc', value=val_step_top1_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=batch_size)
+        
+        # Only compute top-3 for DVSGesture (11 classes)
+        if self.num_classes >= 3:
+            val_step_top3_acc = multiclass_accuracy(val_out_logits, val_labels, num_classes=self.num_classes, average='micro', top_k=3)
+            self.log('val_top3_acc', value=val_step_top3_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=batch_size)
 
         val_step_output = {
             'loss': val_loss,
@@ -100,13 +121,24 @@ class ModelInterface(pl.LightningModule):
 
     # Caution: self.model.eval() is invoked and this function executes within a <with torch.no_grad()> context
     def test_step(self, batch, batch_idx):
-        test_input, test_labels = batch
-        test_out_logits = self(test_input)
-        test_loss = self.loss_function(test_out_logits, test_labels, 'test')
+        # DVSGesture batch format: dict with 'vectors', 'event_coords', 'labels'
+        test_labels = batch['labels']
+        test_out_logits = self(batch)
+        
+        # Get batch size from labels
+        batch_size = test_labels.shape[0]
+        
+        # Compute loss with explicit batch_size
+        test_loss = self.loss_function(test_out_logits, test_labels, 'test', batch_size)
+        
+        # Compute accuracy metrics
         test_step_top1_acc = multiclass_accuracy(test_out_logits, test_labels, num_classes=self.num_classes, average='micro', top_k=1)
-        test_step_top5_acc = multiclass_accuracy(test_out_logits, test_labels, num_classes=self.num_classes, average='micro', top_k=5)
-        self.log('test_top1_acc', value=test_step_top1_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=test_input.shape[0])
-        self.log('test_top5_acc', value=test_step_top5_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=test_input.shape[0])
+        self.log('test_top1_acc', value=test_step_top1_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=batch_size)
+        
+        # Only compute top-3 for DVSGesture (11 classes)
+        if self.num_classes >= 3:
+            test_step_top3_acc = multiclass_accuracy(test_out_logits, test_labels, num_classes=self.num_classes, average='micro', top_k=3)
+            self.log('test_top3_acc', value=test_step_top3_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=batch_size)
 
         test_step_output = {
             'loss': test_loss,
@@ -143,12 +175,12 @@ class ModelInterface(pl.LightningModule):
         return [optimizer_instance], [scheduler_instance]
 
     def __configure_loss(self):
-        def loss_func(preds, labels, stage):
+        def loss_func(preds, labels, stage, batch_size):
             CE_loss = 1.0 * cross_entropy_loss(pred=preds, gt=labels)
-            self.log(f'{stage}_CE_loss', CE_loss, on_step=True, on_epoch=True, prog_bar=True)
+            self.log(f'{stage}_CE_loss', CE_loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
 
             final_loss = CE_loss
-            self.log(f'{stage}_loss', final_loss, on_step=True, on_epoch=True, prog_bar=True)
+            self.log(f'{stage}_loss', final_loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
 
             return final_loss
 

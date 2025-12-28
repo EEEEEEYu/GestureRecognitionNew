@@ -19,6 +19,7 @@ from .scheduler import (
 )
 from .logger import LoggerConfig
 from .checkpoint import CheckpointConfig
+from .precomputing import PrecomputingConfig
 
 __all__ = [
     "TrainingConfig",
@@ -37,4 +38,5 @@ __all__ = [
     "EarlyStoppingConfig",
     "LoggerConfig",
     "CheckpointConfig",
+    "PrecomputingConfig",
 ]

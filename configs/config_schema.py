@@ -17,6 +17,7 @@ from configs.sections import (
     SchedulerConfig,
     LoggerConfig,
     CheckpointConfig,
+    PrecomputingConfig,
 )
 
 @dataclass
@@ -29,6 +30,7 @@ class AppConfig(TrackedConfigMixin):
     SCHEDULER: SchedulerConfig = field(default_factory=SchedulerConfig)
     LOGGER: LoggerConfig = field(default_factory=LoggerConfig)
     CHECKPOINT: CheckpointConfig = field(default_factory=CheckpointConfig)
+    PRECOMPUTING: PrecomputingConfig = field(default_factory=PrecomputingConfig)
 
 
 def _validate_positive(value: Any) -> bool:

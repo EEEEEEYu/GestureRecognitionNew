@@ -6,8 +6,8 @@ TRAINING:
   max_epochs: 50
 
 DISTRIBUTED:
-  accelerator: cpu
-  devices: 1
+  accelerator: gpu  # Changed from cpu - Mamba2 requires CUDA
+  devices: 2
   num_nodes: 1
   strategy: auto
 
@@ -26,9 +26,9 @@ DATA:
       val_ratio_of_vectors: 1.0    # Use 100% (all) vectors during validation
       use_flip_augmentation: False
   dataloader:
-    batch_size: 32  # Adjusted for precomputed data
-    test_batch_size: 64
-    num_workers: 8
+    batch_size: 8  # Reduced for memory efficiency with Mamba2
+    test_batch_size: 16  # Reduced for validation
+    num_workers: 4  # Reduced to avoid worker overhead
     persistent_workers: True
     pin_memory: True
     multiprocessing_context: fork
@@ -38,8 +38,8 @@ DATA:
     shuffle_test: False
 
 MODEL:
-  file_name: simple_net  # TODO: Replace with your SSM model
-  class_name: SimpleNet   # TODO: Replace with your model class
+  file_name: sparse_hilbert_ssm
+  class_name: SparseHilbertSSM
   model_init_args:
     # DVSGesture input parameters
     encoding_dim: 64  # From SparseVKMEncoder output
@@ -49,15 +49,21 @@ MODEL:
       width: ${DATA.dataset.dataset_init_args.width}
       encoding_dim: 64  # Complex vector dimension
       num_classes: ${DATA.dataset.dataset_init_args.num_classes}
-    # Model architecture parameters (example - adjust for your model)
+    # 3D SSM Architecture parameters
     hidden_dim: 256
-    num_layers: 4
+    num_layers: 3  # Number of Mamba2 layers per direction
+    d_state: 64    # SSM state dimension
+    d_conv: 4      # Convolution kernel size in Mamba
+    expand: 2      # Expansion factor in Mamba
+    dropout: 0.4   # Dropout rate (prevents overfitting)
+    pooling_scales: [1, 2, 4]  # Multi-scale temporal pooling
+    use_checkpoint: True  # Gradient checkpointing for memory efficiency
 
 OPTIMIZER:
-  name: Adam
+  name: AdamW
   arguments:
     lr: 1e-3
-    weight_decay: 1e-5  # Default L2 Regularization
+    weight_decay: 1e-3  # Default L2 Regularization
   gradient_accumulation:
     enabled: False
     scheduling: {0: 4, 4: 2, 8: 1}
