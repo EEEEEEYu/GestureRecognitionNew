@@ -1,0 +1,263 @@
+"""
+Dataloader for precomputed DVSGesture dataset stored in HDF5 format.
+
+This dataloader:
+1. Loads precomputed complex tensors from HDF5 files
+2. Implements second-stage downsampling with ratio_of_vectors for data augmentation
+3. Supports train/test modes with optional data augmentation
+"""
+
+import torch
+import torch.utils.data as data
+import h5py
+import numpy as np
+import os
+from typing import Optional, Tuple, List
+import random
+
+
+class DVSGesturePrecomputed(data.Dataset):
+    def __init__(
+        self,
+        precomputed_dir: str,
+        purpose: str = 'train',
+        ratio_of_vectors: float = 1.0,
+        use_flip_augmentation: bool = False,
+        height: int = 128,
+        width: int = 128,
+    ):
+        """
+        DVS Gesture Precomputed Dataset Loader.
+        
+        Args:
+            precomputed_dir: Directory containing precomputed HDF5 files
+            purpose: 'train' or 'validation'
+            ratio_of_vectors: Second-stage downsampling ratio (0.0-1.0)
+                             - Positive values: sample this percentage of vectors
+                             - 1.0: use all precomputed vectors
+                             This provides data augmentation during training
+            use_flip_augmentation: Whether to apply spatial flip augmentation
+            height: Image height (for flip augmentation)
+            width: Image width (for flip augmentation)
+        """
+        assert purpose in ('train', 'validation', 'test'), f"Invalid purpose: {purpose}"
+        
+        self.precomputed_dir = precomputed_dir
+        self.purpose = purpose
+        self.ratio_of_vectors = ratio_of_vectors
+        self.use_flip_augmentation = use_flip_augmentation
+        self.height = height
+        self.width = width
+        
+        # Map test to validation file (if test split doesn't exist)
+        file_purpose = 'validation' if purpose == 'test' else purpose
+        self.h5_path = os.path.join(precomputed_dir, f'{file_purpose}.h5')
+        
+        if not os.path.exists(self.h5_path):
+            raise FileNotFoundError(f"Precomputed file not found: {self.h5_path}")
+        
+        # Open HDF5 file and load metadata
+        with h5py.File(self.h5_path, 'r') as h5f:
+            self.num_samples = h5f['labels'].shape[0]
+            
+            # Store metadata
+            self.accumulation_interval_ms = h5f.attrs['accumulation_interval_ms']
+            self.precompute_ratio = h5f.attrs['ratio_of_vectors']
+            self.encoding_dim = h5f.attrs['encoding_dim']
+            self.temporal_length = h5f.attrs['temporal_length']
+            
+            # Load all metadata into memory for fast access
+            self.labels = h5f['labels'][:].astype(np.int64)
+            self.file_paths = [fp.decode('utf-8') if isinstance(fp, bytes) else fp 
+                             for fp in h5f['file_paths'][:]]
+            self.num_intervals = h5f['num_intervals'][:]
+        
+        print(f"Loaded {self.num_samples} samples from {self.h5_path}")
+        print(f"  Encoding dim: {self.encoding_dim}")
+        print(f"  Precompute ratio (1st stage): {self.precompute_ratio}")
+        print(f"  Training ratio (2nd stage): {self.ratio_of_vectors}")
+    
+    def __len__(self):
+        return self.num_samples
+    
+    def __getitem__(self, idx: int) -> dict:
+        """
+        Load and return a precomputed sample.
+        
+        Returns:
+            Dictionary containing:
+                - 'vectors': Complex tensor of shape [total_vectors, encoding_dim]
+                - 'event_coords': Event coordinates array [total_vectors, 4] with columns [x, y, t, p]
+                - 'num_vectors_per_interval': List of vector counts per interval
+                - 'label': Class label
+                - 'file_path': Original file path
+        """
+        with h5py.File(self.h5_path, 'r') as h5f:
+            sample_group = h5f[f'sample_{idx:06d}']
+            num_intervals = self.num_intervals[idx]
+            
+            # Load all intervals
+            all_vectors = []
+            all_event_coords = []
+            num_vectors_per_interval = []
+            
+            for interval_idx in range(num_intervals):
+                interval_group = sample_group[f'interval_{interval_idx:03d}']
+                
+                # Load real and imaginary parts
+                real_part = torch.from_numpy(interval_group['real'][:])
+                imag_part = torch.from_numpy(interval_group['imag'][:])
+                
+                # Load event coordinates [num_vectors, 4] with columns [x, y, t, p]
+                event_coords = interval_group['event_coords'][:]
+                
+                # Reconstruct complex tensor
+                vectors = torch.complex(real_part, imag_part)
+                
+                # Apply second-stage downsampling if needed
+                if self.ratio_of_vectors < 1.0 and len(vectors) > 0:
+                    num_to_sample = max(1, int(len(vectors) * self.ratio_of_vectors))
+                    
+                    # Random sampling for training augmentation
+                    if num_to_sample < len(vectors):
+                        indices = torch.randperm(len(vectors))[:num_to_sample]
+                        indices = torch.sort(indices)[0]  # Sort for better cache locality
+                        
+                        # Apply same sampling to both vectors and coordinates
+                        vectors = vectors[indices]
+                        event_coords = event_coords[indices.numpy()]
+                
+                all_vectors.append(vectors)
+                all_event_coords.append(event_coords)
+                num_vectors_per_interval.append(len(vectors))
+            
+            # Concatenate all intervals into single tensors
+            if len(all_vectors) > 0 and sum(num_vectors_per_interval) > 0:
+                vectors_concatenated = torch.cat(all_vectors, dim=0)
+                event_coords_concatenated = np.concatenate(all_event_coords, axis=0)
+            else:
+                # Handle empty case
+                vectors_concatenated = torch.zeros(0, self.encoding_dim, dtype=torch.cfloat)
+                event_coords_concatenated = np.zeros((0, 4), dtype=np.float32)
+        
+        # Get label
+        label = self.labels[idx]
+        file_path = self.file_paths[idx]
+        
+        return {
+            'vectors': vectors_concatenated,
+            'event_coords': event_coords_concatenated,  # [total_vectors, 4] with [x, y, t, p]
+            'num_vectors_per_interval': num_vectors_per_interval,
+            'label': label,
+            'file_path': file_path,
+            'num_intervals': num_intervals,
+        }
+    
+    def get_sample_info(self, idx: int) -> dict:
+        """
+        Get information about a sample without loading the vectors.
+        
+        Args:
+            idx: Sample index
+        
+        Returns:
+            Dictionary with sample metadata
+        """
+        return {
+            'label': self.labels[idx],
+            'file_path': self.file_paths[idx],
+            'num_intervals': self.num_intervals[idx],
+        }
+
+
+def collate_fn(batch: List[dict]) -> dict:
+    """
+    Custom collate function for batching precomputed samples.
+    
+    Since different samples may have different numbers of vectors,
+    we need to handle variable-length sequences.
+    
+    Args:
+        batch: List of samples from __getitem__
+    
+    Returns:
+        Batched dictionary with vectors and event coordinates
+    """
+    # Extract components
+    vectors_list = [sample['vectors'] for sample in batch]
+    event_coords_list = [sample['event_coords'] for sample in batch]
+    labels = torch.tensor([sample['label'] for sample in batch], dtype=torch.long)
+    num_vectors_per_sample = [sample['vectors'].shape[0] for sample in batch]
+    
+    # Option 1: Return as list (for variable-length processing)
+    # This is useful if your model can handle variable-length inputs
+    
+    # Option 2: Pad to common length (uncomment if needed)
+    # max_vectors = max(num_vectors_per_sample)
+    # encoding_dim = vectors_list[0].shape[1] if len(vectors_list[0]) > 0 else 64
+    # 
+    # padded_vectors = torch.zeros(len(batch), max_vectors, encoding_dim, dtype=torch.cfloat)
+    # padded_coords = torch.zeros(len(batch), max_vectors, 4, dtype=torch.float32)
+    # mask = torch.zeros(len(batch), max_vectors, dtype=torch.bool)
+    # 
+    # for i, (vectors, coords) in enumerate(zip(vectors_list, event_coords_list)):
+    #     if len(vectors) > 0:
+    #         padded_vectors[i, :len(vectors)] = vectors
+    #         padded_coords[i, :len(vectors)] = torch.from_numpy(coords)
+    #         mask[i, :len(vectors)] = True
+    
+    return {
+        'vectors': vectors_list,  # List of tensors with different lengths
+        'event_coords': event_coords_list,  # List of arrays [num_vectors, 4] with [x, y, t, p]
+        'labels': labels,  # [batch_size]
+        'num_vectors_per_sample': num_vectors_per_sample,  # List of ints
+        'num_vectors_per_interval': [sample['num_vectors_per_interval'] for sample in batch],
+        'file_paths': [sample['file_path'] for sample in batch],
+        'num_intervals': [sample['num_intervals'] for sample in batch],
+    }
+
+
+# Example usage and testing
+if __name__ == '__main__':
+    import argparse
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--precomputed_dir', type=str, required=True)
+    parser.add_argument('--purpose', type=str, default='train')
+    args = parser.parse_args()
+    
+    # Create dataset
+    dataset = DVSGesturePrecomputed(
+        precomputed_dir=args.precomputed_dir,
+        purpose=args.purpose,
+        ratio_of_vectors=0.8,  # Use 80% of precomputed vectors
+    )
+    
+    print(f"\nDataset size: {len(dataset)}")
+    
+    # Test loading a sample
+    sample = dataset[0]
+    print(f"\nSample 0:")
+    print(f"  Vectors shape: {sample['vectors'].shape}")
+    print(f"  Label: {sample['label']}")
+    print(f"  Num intervals: {sample['num_intervals']}")
+    print(f"  Num vectors per interval: {sample['num_vectors_per_interval']}")
+    
+    # Test dataloader
+    from torch.utils.data import DataLoader
+    
+    dataloader = DataLoader(
+        dataset,
+        batch_size=4,
+        shuffle=True,
+        num_workers=2,
+        collate_fn=collate_fn,
+    )
+    
+    print(f"\nTesting dataloader with batch_size=4...")
+    for batch in dataloader:
+        print(f"Batch:")
+        print(f"  Num samples: {len(batch['labels'])}")
+        print(f"  Labels: {batch['labels']}")
+        print(f"  Num vectors per sample: {batch['num_vectors_per_sample']}")
+        break
