@@ -21,6 +21,37 @@ from mamba_ssm import Mamba2
 from typing import List, Tuple
 
 
+
+def drop_path(x, drop_prob: float = 0., training: bool = False, scale_by_keep: bool = True):
+    """
+    Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
+    """
+    if drop_prob == 0. or not training:
+        return x
+    keep_prob = 1 - drop_prob
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+    random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
+    if keep_prob > 0.0 and scale_by_keep:
+        random_tensor.div_(keep_prob)
+    return x * random_tensor
+
+
+class DropPath(nn.Module):
+    """
+    Drop paths (Stochastic Depth) per sample.
+    """
+    def __init__(self, drop_prob: float = 0., scale_by_keep: bool = True):
+        super(DropPath, self).__init__()
+        self.drop_prob = drop_prob
+        self.scale_by_keep = scale_by_keep
+
+    def forward(self, x):
+        return drop_path(x, self.drop_prob, self.training, self.scale_by_keep)
+
+    def extra_repr(self):
+        return f'drop_prob={round(self.drop_prob,3):0.3f}'
+
+
 class SpatialTemporalOrdering(nn.Module):
     """Reorder vectors based on different XYT traversal orders."""
     
@@ -70,6 +101,7 @@ class Mamba2Block(nn.Module):
         d_conv: int = 4,
         expand: int = 2,
         dropout: float = 0.1,
+        drop_path: float = 0.0,
         use_checkpoint: bool = False,
     ):
         super().__init__()
@@ -85,6 +117,7 @@ class Mamba2Block(nn.Module):
         )
         
         self.dropout = nn.Dropout(dropout)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
     
     def _forward_impl(self, x):
         """Actual forward implementation."""
@@ -109,7 +142,7 @@ class Mamba2Block(nn.Module):
         else:
             x = self._forward_impl(x)
         
-        return x + residual
+        return residual + self.drop_path(x)
 
 
 class MultiDirectionalSSM(nn.Module):
@@ -127,6 +160,7 @@ class MultiDirectionalSSM(nn.Module):
         d_conv: int = 4,
         expand: int = 2,
         dropout: float = 0.1,
+        drop_path: float = 0.0,
         num_layers: int = 2,
         use_checkpoint: bool = False,
     ):
@@ -137,10 +171,16 @@ class MultiDirectionalSSM(nn.Module):
         
         # Create separate Mamba2 stacks for each direction
         self.direction_models = nn.ModuleDict()
+        
+        # Stochastic depth decay rule: linear decay of drop_path rate
+        # We process layers sequentially in each stack, so we distribute drop_prob 
+        dp_rates = [x.item() for x in torch.linspace(0, drop_path, num_layers)]
+
         for order_name in self.order_names:
             layers = nn.ModuleList([
-                Mamba2Block(d_model, d_state, d_conv, expand, dropout, use_checkpoint)
-                for _ in range(num_layers)
+                Mamba2Block(d_model, d_state, d_conv, expand, dropout, 
+                          drop_path=dp_rates[i], use_checkpoint=use_checkpoint)
+                for i in range(num_layers)
             ])
             self.direction_models[order_name] = layers
         
@@ -217,9 +257,10 @@ class SparseHilbertSSM(nn.Module):
         d_conv: int = 4,
         expand: int = 2,
         dropout: float = 0.2,
+        drop_path: float = 0.1,
         pooling_scales: List[int] = [1, 2, 4],
         use_checkpoint: bool = True,  # Enable by default for memory efficiency
-        input_meta: dict = None,  # Optional metadata (not used, just for config compat)
+        input_meta: dict = None,  # Optional metadata
     ):
         super().__init__()
         
@@ -243,6 +284,7 @@ class SparseHilbertSSM(nn.Module):
             d_conv=d_conv,
             expand=expand,
             dropout=dropout,
+            drop_path=drop_path,
             num_layers=num_layers,
             use_checkpoint=use_checkpoint,
         )
@@ -382,11 +424,12 @@ def create_sparse_hilbert_ssm(config):
         encoding_dim=model_args.get('encoding_dim', 64),
         hidden_dim=model_args.get('hidden_dim', 256),
         num_classes=model_args.get('num_classes', 11),
-        num_ssm_layers=model_args.get('num_layers', 3),
+        num_layers=model_args.get('num_layers', 3),
         d_state=model_args.get('d_state', 64),
         d_conv=model_args.get('d_conv', 4),
         expand=model_args.get('expand', 2),
         dropout=model_args.get('dropout', 0.2),
+        drop_path=model_args.get('drop_path', 0.0),
         pooling_scales=model_args.get('pooling_scales', [1, 2, 4]),
         use_checkpoint=model_args.get('use_checkpoint', True),
     )

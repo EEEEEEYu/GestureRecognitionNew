@@ -155,8 +155,55 @@ class ModelInterface(pl.LightningModule):
         except AttributeError as exc:
             raise ValueError(f"Invalid optimizer: OPTIMIZER.{self.optimizer_cfg.name}") from exc
 
+        # Split parameters into separate groups for weight decay
+        # Reference: https://github.com/karpathy/minGPT/blob/master/mingpt/model.py
+        decay = set()
+        no_decay = set()
+        whitelist_weight_modules = (torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)
+        blacklist_weight_modules = (torch.nn.LayerNorm, torch.nn.GroupNorm, torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d, torch.nn.Embedding)
+        
+        for mn, m in self.model.named_modules():
+            for pn, p in m.named_parameters():
+                fpn = '%s.%s' % (mn, pn) if mn else pn # full param name
+                
+                if pn.endswith('bias'):
+                    # all biases will not be decayed
+                    no_decay.add(fpn)
+                elif pn.endswith('weight') and isinstance(m, whitelist_weight_modules):
+                    # weights of whitelist modules will be weight decayed
+                    decay.add(fpn)
+                elif pn.endswith('weight') and isinstance(m, blacklist_weight_modules):
+                    # weights of blacklist modules will NOT be weight decayed
+                    no_decay.add(fpn)
+                
+                # Special cases for Mamba parameters
+                # A_log, D are specific to SSMs and usually shouldn't be decayed or have special rules
+                # For simplicity here, we stick to standard rules: only standard weights get decay
+                elif 'A_log' in pn or 'D' in pn:
+                    no_decay.add(fpn)
+        
+        # Validate that we considered every parameter
+        param_dict = {pn: p for pn, p in self.model.named_parameters()}
+        inter_params = decay & no_decay
+        union_params = decay | no_decay
+        assert len(inter_params) == 0, "parameters %s made it into both decay/no_decay sets!" % (str(inter_params), )
+        # Note: some parameters might not fall into the simple loops above (e.g. if they are directly in the module), 
+        # so we add the rest to no_decay to be safe (e.g. learnable scalars)
+        remaining_params = param_dict.keys() - union_params
+        for p in remaining_params:
+            no_decay.add(p)
+            
+        optim_groups = [
+            {"params": [param_dict[pn] for pn in sorted(list(decay))], "weight_decay": self.optimizer_cfg.arguments.get('weight_decay', 0.0)},
+            {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0},
+        ]
+
         optimizer_arguments = dict(self.optimizer_cfg.arguments or {})
-        optimizer_instance = optimizer_class(params=self.model.parameters(), **optimizer_arguments)
+        # Remove weight_decay from kwargs since it's handled in groups
+        if 'weight_decay' in optimizer_arguments:
+            del optimizer_arguments['weight_decay']
+            
+        optimizer_instance = optimizer_class(params=optim_groups, **optimizer_arguments)
 
         learning_rate_scheduler_cfg = self.scheduler_cfg.learning_rate
         if not learning_rate_scheduler_cfg.enabled:
@@ -175,8 +222,13 @@ class ModelInterface(pl.LightningModule):
         return [optimizer_instance], [scheduler_instance]
 
     def __configure_loss(self):
+        label_smoothing = self.training_cfg.label_smoothing
+        
         def loss_func(preds, labels, stage, batch_size):
-            CE_loss = 1.0 * cross_entropy_loss(pred=preds, gt=labels)
+            # Only apply label smoothing during training
+            smoothing = label_smoothing if stage == 'train' else 0.0
+            
+            CE_loss = 1.0 * cross_entropy_loss(pred=preds, gt=labels, label_smoothing=smoothing)
             self.log(f'{stage}_CE_loss', CE_loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
 
             final_loss = CE_loss

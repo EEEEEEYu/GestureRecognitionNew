@@ -16,6 +16,67 @@ from typing import Optional, Tuple, List
 import random
 
 
+class Augmentor:
+    """
+    Robust Augmentation for Event lists and Point Clouds.
+    """
+    def __init__(
+        self, 
+        jitter_std: float = 0.0,
+        drop_rate: float = 0.0,
+        time_scale_min: float = 1.0,
+        time_scale_max: float = 1.0
+    ):
+        self.jitter_std = jitter_std
+        self.drop_rate = drop_rate
+        self.time_scale_min = time_scale_min
+        self.time_scale_max = time_scale_max
+        
+    def __call__(self, vectors: torch.Tensor, event_coords: np.ndarray) -> Tuple[torch.Tensor, np.ndarray]:
+        """
+        Apply augmentations.
+        
+        Args:
+            vectors: [N, C] complex tensor
+            event_coords: [N, 4] numpy array [x, y, t, p]
+            
+        Returns:
+            Augmented vectors and coords
+        """
+        if len(vectors) == 0:
+            return vectors, event_coords
+            
+        # 1. Temporal Scaling (Traveral Speed Augmentation)
+        # Scales the 't' coordinate, which affects relative temporal ordering sorting
+        if self.time_scale_min != 1.0 or self.time_scale_max != 1.0:
+            scale = random.uniform(self.time_scale_min, self.time_scale_max)
+            # t is at index 2
+            event_coords[:, 2] *= scale
+            
+        # 2. Coordinate Jittering (Traversal Order Augmentation)
+        # Adds noise to x,y,t to perturb Hilbert curve sorting order
+        if self.jitter_std > 0:
+            noise = np.random.normal(0, self.jitter_std, event_coords[:, :3].shape).astype(event_coords.dtype)
+            event_coords[:, :3] += noise
+            
+        # 3. Event Drop (Robustness to Occlusion/Noise)
+        # Randomly drops entire vectors from the sequence
+        if self.drop_rate > 0:
+            num_events = len(vectors)
+            keep_prob = 1.0 - self.drop_rate
+            # Create mask
+            mask = torch.rand(num_events) < keep_prob
+            
+            # Ensure we don't drop everything
+            if mask.sum() == 0:
+                mask[0] = True
+                
+            vectors = vectors[mask]
+            event_coords = event_coords[mask.numpy()]
+            
+        return vectors, event_coords
+
+
 class DVSGesturePrecomputed(data.Dataset):
     def __init__(
         self,
@@ -23,6 +84,10 @@ class DVSGesturePrecomputed(data.Dataset):
         purpose: str = 'train',
         ratio_of_vectors: float = 1.0,
         use_flip_augmentation: bool = False,
+        aug_jitter_std: float = 0.0,
+        aug_drop_rate: float = 0.0,
+        aug_time_scale_min: float = 1.0,
+        aug_time_scale_max: float = 1.0,
         height: int = 128,
         width: int = 128,
     ):
@@ -46,6 +111,17 @@ class DVSGesturePrecomputed(data.Dataset):
         self.purpose = purpose
         self.ratio_of_vectors = ratio_of_vectors
         self.use_flip_augmentation = use_flip_augmentation
+        
+        # Initialize augmenter for training
+        self.augmentor = None
+        if purpose == 'train':
+            self.augmentor = Augmentor(
+                jitter_std=aug_jitter_std,
+                drop_rate=aug_drop_rate,
+                time_scale_min=aug_time_scale_min,
+                time_scale_max=aug_time_scale_max
+            )
+            
         self.height = height
         self.width = width
         
@@ -131,10 +207,18 @@ class DVSGesturePrecomputed(data.Dataset):
                 all_event_coords.append(event_coords)
                 num_vectors_per_interval.append(len(vectors))
             
-            # Concatenate all intervals into single tensors
+                # Concatenate all intervals into single tensors
             if len(all_vectors) > 0 and sum(num_vectors_per_interval) > 0:
                 vectors_concatenated = torch.cat(all_vectors, dim=0)
                 event_coords_concatenated = np.concatenate(all_event_coords, axis=0)
+                
+                # Apply Robust Augmentations (Jitter, Drop, TimeScale)
+                # This modifies event coordinates and potentially drops vectors
+                if self.augmentor is not None:
+                    vectors_concatenated, event_coords_concatenated = self.augmentor(
+                        vectors_concatenated, event_coords_concatenated
+                    )
+                    
             else:
                 # Handle empty case
                 vectors_concatenated = torch.zeros(0, self.encoding_dim, dtype=torch.cfloat)

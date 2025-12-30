@@ -3,7 +3,8 @@ TRAINING:
   use_compile: False
   inference_mode: False  # If this one is True, use inference
   seed: 42
-  max_epochs: 50
+  max_epochs: 100 # Increased from 50
+  label_smoothing: 0.1 # Soft targets to prevent overconfidence
 
 DISTRIBUTED:
   accelerator: gpu  # Changed from cpu - Mamba2 requires CUDA
@@ -22,9 +23,15 @@ DATA:
       width: 128
       num_classes: 11  # DVSGesture has 11 classes
       # Second-stage downsampling (training-time augmentation)
-      train_ratio_of_vectors: 0.8  # Use 80% of precomputed vectors during training
-      val_ratio_of_vectors: 1.0    # Use 100% (all) vectors during validation
-      use_flip_augmentation: False
+      train_ratio_of_vectors: 0.5  # Use 50% of the 30% precomputed vectors = 15% total (Changed from 0.8)
+      val_ratio_of_vectors: 1.0    # Use 100% of precomputed vectors during validation
+      use_flip_augmentation: False # Disabled as per request
+      # Robustness Augmentations
+      aug_jitter_std: 0.5       # Coordinate Jitter (pixels/time). Moderate strength.
+      aug_drop_rate: 0.1        # Event Drop Rate (10%). Moderate strength.
+      aug_time_scale_min: 0.8   # Temporal Scaling Min (20% faster).
+      aug_time_scale_max: 1.2   # Temporal Scaling Max (20% slower).
+
   dataloader:
     batch_size: 8  # Reduced for memory efficiency with Mamba2
     test_batch_size: 16  # Reduced for validation
@@ -51,11 +58,12 @@ MODEL:
       num_classes: ${DATA.dataset.dataset_init_args.num_classes}
     # 3D SSM Architecture parameters
     hidden_dim: 256
-    num_layers: 3  # Number of Mamba2 layers per direction
-    d_state: 64    # SSM state dimension
+    num_layers: 4  # Increased from 3 (deeper model)
+    d_state: 128   # Increased from 64 (higher capacity for temporal dynamics)
     d_conv: 4      # Convolution kernel size in Mamba
     expand: 2      # Expansion factor in Mamba
-    dropout: 0.4   # Dropout rate (prevents overfitting)
+    dropout: 0.2   # Dropout rate (reduced from 0.4 due to added DropPath)
+    drop_path: 0.1 # Stochastic depth rate (DropPath)
     pooling_scales: [1, 2, 4]  # Multi-scale temporal pooling
     use_checkpoint: True  # Gradient checkpointing for memory efficiency
 
@@ -63,7 +71,7 @@ OPTIMIZER:
   name: AdamW
   arguments:
     lr: 1e-3
-    weight_decay: 1e-3  # Default L2 Regularization
+    weight_decay: 0.05  # Increased L2 Regularization (now excludes bias/norm)
   gradient_accumulation:
     enabled: False
     scheduling: {0: 4, 4: 2, 8: 1}
@@ -80,8 +88,8 @@ SCHEDULER:
     enabled: True
     name: CosineAnnealingLR
     arguments:
-      T_max: 50  # Number of epochs by default
-      eta_min: 1e-6
+      T_max: ${TRAINING.max_epochs}  # Matched to max_epochs
+      eta_min: 1e-5
   early_stopping:
     enabled: False
     monitor: val_loss_epoch
@@ -106,7 +114,7 @@ PRECOMPUTING:
   dataset_dir: /fs/nexus-projects/DVS_Actions/DVSGestureData
   output_dir: /fs/nexus-scratch/haowenyu/GestureRecognitionNew/precomputed_data/dvsgesture
   accumulation_interval_ms: 200.0  # Window size for splitting event stream
-  ratio_of_vectors: 0.1  # First stage downsampling: ratio of vectors to events for precomputation
+  ratio_of_vectors: 0.3  # Increased from 0.1 to allow better training-time sampling
   encoding_dim: 64
   temporal_length: 200.0  # Should match accumulation_interval_ms
   kernel_size: 17
