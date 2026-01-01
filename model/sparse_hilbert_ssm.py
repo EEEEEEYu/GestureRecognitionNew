@@ -163,26 +163,37 @@ class MultiDirectionalSSM(nn.Module):
         drop_path: float = 0.0,
         num_layers: int = 2,
         use_checkpoint: bool = False,
+        share_weights: bool = False,
     ):
         super().__init__()
         
         self.ordering = SpatialTemporalOrdering()
         self.order_names = ['XYT', 'XTY', 'YXT', 'YTX', 'TXY', 'TYX']
         
-        # Create separate Mamba2 stacks for each direction
-        self.direction_models = nn.ModuleDict()
+        self.share_weights = share_weights
         
         # Stochastic depth decay rule: linear decay of drop_path rate
         # We process layers sequentially in each stack, so we distribute drop_prob 
         dp_rates = [x.item() for x in torch.linspace(0, drop_path, num_layers)]
 
-        for order_name in self.order_names:
-            layers = nn.ModuleList([
+        if self.share_weights:
+            # Create a single stack of layers to be shared across all directions
+            self.shared_layers = nn.ModuleList([
                 Mamba2Block(d_model, d_state, d_conv, expand, dropout, 
                           drop_path=dp_rates[i], use_checkpoint=use_checkpoint)
                 for i in range(num_layers)
             ])
-            self.direction_models[order_name] = layers
+            self.direction_models = None
+        else:
+            # Create separate Mamba2 stacks for each direction
+            self.direction_models = nn.ModuleDict()
+            for order_name in self.order_names:
+                layers = nn.ModuleList([
+                    Mamba2Block(d_model, d_state, d_conv, expand, dropout, 
+                              drop_path=dp_rates[i], use_checkpoint=use_checkpoint)
+                    for i in range(num_layers)
+                ])
+                self.direction_models[order_name] = layers
         
         # Fusion layer to combine multi-directional outputs
         self.fusion = nn.Sequential(
@@ -218,7 +229,8 @@ class MultiDirectionalSSM(nn.Module):
             x = vectors[:, indices_tensor, :]
             
             # Pass through Mamba2 layers
-            for layer in self.direction_models[order_name]:
+            layers = self.shared_layers if self.share_weights else self.direction_models[order_name]
+            for layer in layers:
                 x = layer(x)
             
             # Reverse ordering to original positions
@@ -260,6 +272,7 @@ class SparseHilbertSSM(nn.Module):
         drop_path: float = 0.1,
         pooling_scales: List[int] = [1, 2, 4],
         use_checkpoint: bool = True,  # Enable by default for memory efficiency
+        share_weights: bool = True,   # Share weights across directions
         input_meta: dict = None,  # Optional metadata
     ):
         super().__init__()
@@ -287,6 +300,7 @@ class SparseHilbertSSM(nn.Module):
             drop_path=drop_path,
             num_layers=num_layers,
             use_checkpoint=use_checkpoint,
+            share_weights=share_weights,
         )
         
         # Multi-scale pooling
@@ -352,16 +366,16 @@ class SparseHilbertSSM(nn.Module):
         
         return torch.cat(pooled_features, dim=0)
     
-    def forward_single(self, vectors, event_coords):
+    def extract_features(self, vectors, event_coords):
         """
-        Process a single sample with explicit batch dimension.
+        Process a single sample to extract pooled features.
         
         Args:
             vectors: [length, encoding_dim] complex tensor
             event_coords: [length, 4] numpy array
         
         Returns:
-            logits: [num_classes]
+            pooled: [pooled_dim]
         """
         # Input projection
         # Stack real and imaginary parts: [L, encoding_dim] → [L, 2*encoding_dim]
@@ -382,37 +396,70 @@ class SparseHilbertSSM(nn.Module):
         # Multi-scale pooling: [L, hidden_dim] → [pooled_dim]
         pooled = self.multi_scale_pool(x)
         
-        # Classification: [pooled_dim] → [num_classes]
-        logits = self.classifier(pooled)
-        
-        return logits
+        return pooled
     
-    def forward(self, batch):
+    def forward_single(self, vectors, event_coords):
         """
-        Process a batch of variable-length samples.
+        Process a single sample (backward capability wrapper).
+        """
+        pooled = self.extract_features(vectors, event_coords)
+        return self.classifier(pooled)
+    
+    def forward(self, batch, mixup_alpha: float = 0.0):
+        """
+        Process a batch of variable-length samples with optional Manifold Mixup.
         
         Args:
             batch: Dictionary with:
                 - vectors: List[Tensor] of shape [length_i, encoding_dim]
                 - event_coords: List[ndarray] of shape [length_i, 4]
+            mixup_alpha (float): Alpha parameter for Beta distribution. If > 0, apply mixup.
         
         Returns:
-            logits: [batch_size, num_classes]
+            If mixup_alpha > 0 and training:
+                (logits, shuffled_indices, lambda)
+            Else:
+                logits: [batch_size, num_classes]
         """
         vectors_list = batch['vectors']
         coords_list = batch['event_coords']
         
-        logits_list = []
+        features_list = []
         
         for i, (vectors, coords) in enumerate(zip(vectors_list, coords_list)):
-            logits = self.forward_single(vectors, coords)
-            logits_list.append(logits)
+            # Extract features for each sample
+            feat = self.extract_features(vectors, coords)
+            features_list.append(feat)
             
             # Clear GPU cache between samples to prevent OOM
             if torch.cuda.is_available() and i % 4 == 3:  # Every 4 samples
                 torch.cuda.empty_cache()
         
-        return torch.stack(logits_list)  # [batch_size, num_classes]
+        # Stack features: [batch_size, pooled_dim]
+        features = torch.stack(features_list)
+        
+        # Apply Manifold Mixup if training and enabled
+        if self.training and mixup_alpha > 0:
+            batch_size = features.shape[0]
+            device = features.device
+            
+            # Sample lambda from Beta distribution
+            lam = np.random.beta(mixup_alpha, mixup_alpha)
+            
+            # Generate shuffled indices
+            index = torch.randperm(batch_size).to(device)
+            
+            # Mix features
+            mixed_features = lam * features + (1 - lam) * features[index, :]
+            
+            # Classify mixed features
+            logits = self.classifier(mixed_features)
+            
+            return logits, index, lam
+        else:
+            # Standard classification with NO mixup
+            logits = self.classifier(features)
+            return logits
 
 
 # Model factory function
@@ -432,4 +479,5 @@ def create_sparse_hilbert_ssm(config):
         drop_path=model_args.get('drop_path', 0.0),
         pooling_scales=model_args.get('pooling_scales', [1, 2, 4]),
         use_checkpoint=model_args.get('use_checkpoint', True),
+        share_weights=model_args.get('share_weights', True),
     )

@@ -11,3 +11,4 @@ class TrainingConfig(TrackedConfigMixin):
     seed: int = 42
     max_epochs: int = 1
     label_smoothing: float = 0.0
+    mixup_alpha: float = 1.0

@@ -3,8 +3,9 @@ TRAINING:
   use_compile: False
   inference_mode: False  # If this one is True, use inference
   seed: 42
-  max_epochs: 100 # Increased from 50
+  max_epochs: 120 # Increased from 50
   label_smoothing: 0.1 # Soft targets to prevent overconfidence
+  mixup_alpha: 1.0 # Manifold Mixup strength (alpha=1.0 is uniform [0,1])
 
 DISTRIBUTED:
   accelerator: gpu  # Changed from cpu - Mamba2 requires CUDA
@@ -58,10 +59,11 @@ MODEL:
       num_classes: ${DATA.dataset.dataset_init_args.num_classes}
     # 3D SSM Architecture parameters
     hidden_dim: 256
-    num_layers: 4  # Increased from 3 (deeper model)
+    num_layers: 6  # Increased from 4 (deeper model enabled by weight sharing)
     d_state: 128   # Increased from 64 (higher capacity for temporal dynamics)
-    d_conv: 4      # Convolution kernel size in Mamba
+    d_conv: 4      # Reverted to 4 (max supported by optimized causal_conv1d kernel)
     expand: 2      # Expansion factor in Mamba
+    share_weights: True # Share weights across 6 directions (Massive param reduction: 12M -> ~3M)
     dropout: 0.2   # Dropout rate (reduced from 0.4 due to added DropPath)
     drop_path: 0.1 # Stochastic depth rate (DropPath)
     pooling_scales: [1, 2, 4]  # Multi-scale temporal pooling
@@ -80,8 +82,11 @@ OPTIMIZER:
     gradient_clip_val: 1.0
     gradient_clip_algorithm: norm # norm or value
   stochastic_weight_averaging:
-    enabled: False
-    swa_lrs: 1e-2
+    enabled: True
+    swa_lrs: 1e-3
+    swa_epoch_start: 0.8
+    annealing_epochs: 20
+    annealing_strategy: cos
 
 SCHEDULER:
   learning_rate:      # For learning rate scheduler, check document: https://docs.pytorch.org/docs/2.8/optim.html#how-to-adjust-learning-rate
@@ -89,7 +94,7 @@ SCHEDULER:
     name: CosineAnnealingLR
     arguments:
       T_max: ${TRAINING.max_epochs}  # Matched to max_epochs
-      eta_min: 1e-5
+      eta_min: 1e-6
   early_stopping:
     enabled: False
     monitor: val_loss_epoch
@@ -99,14 +104,14 @@ SCHEDULER:
   
 LOGGER:
   log_dir_root: lightning_logs
-  experiment_name: simple_net_classify_v0
+  experiment_name: hilbert_ssm_dvsgesture
 
 CHECKPOINT:
   enabled: True
   every_n_epochs: 1
-  monitor: val_loss_epoch
-  mode: min
-  filename: "best-{epoch:03d}-{val_loss_epoch:.5f}"
+  monitor: val_top1_acc_epoch
+  mode: max
+  filename: "best-{epoch:03d}-{val_top1_acc_epoch:.5f}"
   save_top_k: 1
   save_last: True
 

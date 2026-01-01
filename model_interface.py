@@ -65,15 +65,38 @@ class ModelInterface(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         # DVSGesture batch format: dict with 'vectors', 'event_coords', 'labels'
         train_labels = batch['labels']
-        train_out_logits = self(batch)
+        mixup_alpha = getattr(self.training_cfg, 'mixup_alpha', 0.0)
         
+        # Run forward pass with optional mixup
+        output = self.model(batch, mixup_alpha=mixup_alpha)
+        
+        # Check if mixup was applied (tuple return)
+        if isinstance(output, tuple):
+            pred, shuffled_indices, lam = output
+            
+            # Mixup Loss: lam * loss(pred, y_a) + (1-lam) * loss(pred, y_b)
+            # Use stage='train' to include label smoothing if configured
+            loss_a = self.loss_function(pred, train_labels, 'train', None) # Pass None for batch_size to skip internal logging for now
+            loss_b = self.loss_function(pred, train_labels[shuffled_indices], 'train', None)
+            
+            train_loss = lam * loss_a + (1 - lam) * loss_b
+            
+            # For accuracy calculation, we check against the dominant label (if lam > 0.5)
+            # or just use the original labels for a rough metric (mixup accuracy is fuzzy)
+            train_out_logits = pred # For metrics
+        else:
+            train_out_logits = output
+            # Standard loss
+            train_loss = self.loss_function(train_out_logits, train_labels, 'train', train_labels.shape[0])
+
         # Get batch size from labels
         batch_size = train_labels.shape[0]
-        
-        # Compute loss with explicit batch_size
-        train_loss = self.loss_function(train_out_logits, train_labels, 'train', batch_size)
 
-        # Compute accuracy metrics
+        # Log total loss manually if we skipped it inside loss_function for mixup
+        if isinstance(output, tuple):
+            self.log('train_loss', train_loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
+
+        # Compute accuracy metrics (using original labels - slightly inaccurate for Mixup but serves as proxy)
         train_step_top1_acc = multiclass_accuracy(train_out_logits, train_labels, num_classes=self.num_classes, average='micro', top_k=1)
         self.log('train_top1_acc', value=train_step_top1_acc, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=batch_size)
         
@@ -229,10 +252,14 @@ class ModelInterface(pl.LightningModule):
             smoothing = label_smoothing if stage == 'train' else 0.0
             
             CE_loss = 1.0 * cross_entropy_loss(pred=preds, gt=labels, label_smoothing=smoothing)
-            self.log(f'{stage}_CE_loss', CE_loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
+            
+            # If batch_size is provided, log the metric. If None (mixed up), we log manually in training_step.
+            if batch_size is not None:
+                self.log(f'{stage}_CE_loss', CE_loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
+                self.log(f'{stage}_loss', CE_loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
 
             final_loss = CE_loss
-            self.log(f'{stage}_loss', final_loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
+
 
             return final_loss
 

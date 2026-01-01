@@ -21,6 +21,9 @@ class GradientClipConfig(TrackedConfigMixin):
 class SWAConfig(TrackedConfigMixin):
     enabled: bool = False
     swa_lrs: float = 1e-2
+    swa_epoch_start: float = 0.6
+    annealing_epochs: int = 10
+    annealing_strategy: str = "cos"
 
 
 @dataclass
