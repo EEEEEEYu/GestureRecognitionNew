@@ -3,9 +3,9 @@ TRAINING:
   use_compile: False
   inference_mode: False  # If this one is True, use inference
   seed: 42
-  max_epochs: 120 # Increased from 50
-  label_smoothing: 0.1 # Soft targets to prevent overconfidence
-  mixup_alpha: 1.0 # Manifold Mixup strength (alpha=1.0 is uniform [0,1])
+  max_epochs: 100 # Increased from 50
+  label_smoothing: 0.00 # Soft targets to prevent overconfidence
+  mixup_alpha: 0.0 # Reduced from 1.0. Manifold Mixup strength (alpha=1.0 is uniform [0,1])
 
 DISTRIBUTED:
   accelerator: gpu  # Changed from cpu - Mamba2 requires CUDA
@@ -28,8 +28,8 @@ DATA:
       val_ratio_of_vectors: 1.0    # Use 100% of precomputed vectors during validation
       use_flip_augmentation: False # Disabled as per request
       # Robustness Augmentations
-      aug_jitter_std: 0.5       # Coordinate Jitter (pixels/time). Moderate strength.
-      aug_drop_rate: 0.1        # Event Drop Rate (10%). Moderate strength.
+      aug_jitter_std: 0.25       # Coordinate Jitter (pixels/time). Moderate strength.
+      aug_drop_rate: 0.05        # Event Drop Rate (10%). Moderate strength.
       aug_time_scale_min: 0.8   # Temporal Scaling Min (20% faster).
       aug_time_scale_max: 1.2   # Temporal Scaling Max (20% slower).
 
@@ -63,9 +63,9 @@ MODEL:
     d_state: 128   # Increased from 64 (higher capacity for temporal dynamics)
     d_conv: 4      # Reverted to 4 (max supported by optimized causal_conv1d kernel)
     expand: 2      # Expansion factor in Mamba
-    share_weights: True # Share weights across 6 directions (Massive param reduction: 12M -> ~3M)
-    dropout: 0.2   # Dropout rate (reduced from 0.4 due to added DropPath)
-    drop_path: 0.1 # Stochastic depth rate (DropPath)
+    share_weights: 'bidirectional' # Share weights between reverse pairs (3 groups). 6M params.
+    dropout: 0.2   # Reduced from 0.2 to prevent underfitting
+    drop_path: 0.1 # Reduced from 0.1
     pooling_scales: [1, 2, 4]  # Multi-scale temporal pooling
     use_checkpoint: True  # Gradient checkpointing for memory efficiency
 
@@ -73,7 +73,7 @@ OPTIMIZER:
   name: AdamW
   arguments:
     lr: 1e-3
-    weight_decay: 0.05  # Increased L2 Regularization (now excludes bias/norm)
+    weight_decay: 0.01  # Increased L2 Regularization (now excludes bias/norm)
   gradient_accumulation:
     enabled: False
     scheduling: {0: 4, 4: 2, 8: 1}

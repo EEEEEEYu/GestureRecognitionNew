@@ -163,7 +163,7 @@ class MultiDirectionalSSM(nn.Module):
         drop_path: float = 0.0,
         num_layers: int = 2,
         use_checkpoint: bool = False,
-        share_weights: bool = False,
+        share_weights: bool | str = False,
     ):
         super().__init__()
         
@@ -176,7 +176,34 @@ class MultiDirectionalSSM(nn.Module):
         # We process layers sequentially in each stack, so we distribute drop_prob 
         dp_rates = [x.item() for x in torch.linspace(0, drop_path, num_layers)]
 
-        if self.share_weights:
+        if self.share_weights == 'bidirectional':
+            # Create 3 stacks of layers, one for each "axis pair" (XYT/XTY, YXT/YTX, TXY/TYX)
+            # This is a middle ground: sharing weights between an order and its reverse, but not across axes.
+            self.shared_layers = nn.ModuleDict()
+            # Pairs: (XYT, XTY) -> 0; (YXT, YTX) -> 1; (TXY, TYX) -> 2
+            # Wait, XYT and XTY are not reverses. Reverses are XYT (0,1,2) vs TYX (2,1,0)?
+            # The prompt asks for: "traverse XYT and TYX(reverse order) in a single mamba block"
+            # Let's map the 6 orders to 3 groups based on exact reverse.
+            # XYT (0,1,2) <-> TYX (2,1,0)
+            # XTY (0,2,1) <-> YTX (1,2,0)
+            # YXT (1,0,2) <-> TXY (2,0,1)
+            
+            self.pair_map = {
+                'XYT': 'group1', 'TYX': 'group1',
+                'XTY': 'group2', 'YTX': 'group2',
+                'YXT': 'group3', 'TXY': 'group3'
+            }
+            
+            for group in ['group1', 'group2', 'group3']:
+                layers = nn.ModuleList([
+                    Mamba2Block(d_model, d_state, d_conv, expand, dropout, 
+                              drop_path=dp_rates[i], use_checkpoint=use_checkpoint)
+                    for i in range(num_layers)
+                ])
+                self.shared_layers[group] = layers
+            self.direction_models = None
+
+        elif self.share_weights:
             # Create a single stack of layers to be shared across all directions
             self.shared_layers = nn.ModuleList([
                 Mamba2Block(d_model, d_state, d_conv, expand, dropout, 
@@ -229,7 +256,15 @@ class MultiDirectionalSSM(nn.Module):
             x = vectors[:, indices_tensor, :]
             
             # Pass through Mamba2 layers
-            layers = self.shared_layers if self.share_weights else self.direction_models[order_name]
+            # Pass through Mamba2 layers
+            if self.share_weights == 'bidirectional':
+                group = self.pair_map[order_name]
+                layers = self.shared_layers[group]
+            elif self.share_weights:
+                layers = self.shared_layers
+            else:
+                layers = self.direction_models[order_name]
+                
             for layer in layers:
                 x = layer(x)
             
@@ -272,7 +307,7 @@ class SparseHilbertSSM(nn.Module):
         drop_path: float = 0.1,
         pooling_scales: List[int] = [1, 2, 4],
         use_checkpoint: bool = True,  # Enable by default for memory efficiency
-        share_weights: bool = True,   # Share weights across directions
+        share_weights: bool | str = True,   # Share weights across directions
         input_meta: dict = None,  # Optional metadata
     ):
         super().__init__()
