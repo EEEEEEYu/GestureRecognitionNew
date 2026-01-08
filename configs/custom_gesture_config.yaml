@@ -1,0 +1,167 @@
+TRAINING:
+  deterministic: False
+  use_compile: False
+  inference_mode: False  # If this one is True, use inference
+  seed: 42
+  max_epochs: 100
+  label_smoothing: 0.05 # Soft targets to prevent overconfidence
+  mixup_alpha: 0.0 # Manifold Mixup strength
+  precision: "32-true"  # bf16-mixed or 32-true
+
+DISTRIBUTED:
+  accelerator: gpu
+  devices: 2
+  num_nodes: 1
+  strategy: auto
+
+DATA:
+  dataset:
+    file_name: CustomGesturePrecomputed
+    class_name: CustomGesturePrecomputed
+    dataset_init_args:
+      # Custom Gesture-specific parameters
+      precomputed_dir: /fs/nexus-projects/DVS_Actions/precomputed_data/custom_gesture_downsampled_dynamic_removed
+      height: 240  # Custom dataset event camera resolution
+      width: 320   # Custom dataset event camera resolution
+      num_classes: 16  # 16 classes for custom gesture dataset
+      # Second-stage downsampling (training-time augmentation)
+      train_ratio_of_vectors: 0.4  # Use 75% of precomputed vectors
+      val_ratio_of_vectors: 0.4   # Use 100% of precomputed vectors during validation
+      use_flip_augmentation: False # Disabled as per request
+      # Robustness Augmentations
+      aug_jitter_std: 0.5       # Coordinate Jitter (pixels/time). Moderate strength.
+      aug_drop_rate: 0.1        # Event Drop Rate (10%). Moderate strength.
+      aug_time_scale_min: 0.8   # Temporal Scaling Min (20% faster).
+      aug_time_scale_max: 1.2   # Temporal Scaling Max (20% slower).
+
+  dataloader:
+    batch_size: 2  # Increased from 1 (enabled by BF16 + model optimizations)
+    test_batch_size: 2  # Match training batch size
+    num_workers: 2  # Reduced to avoid worker overhead
+    persistent_workers: True
+    pin_memory: True
+    multiprocessing_context: fork
+    drop_last: False
+    shuffle_train: True
+    shuffle_val: False
+    shuffle_test: False
+
+MODEL:
+  file_name: sparse_hilbert_ssm
+  class_name: SparseHilbertSSM
+  model_init_args:
+    # Custom Gesture input parameters
+    encoding_dim: ${PRECOMPUTING.encoding_dim}  # From SparseVKMEncoder output
+    num_classes: ${DATA.dataset.dataset_init_args.num_classes}
+    input_meta:
+      height: ${DATA.dataset.dataset_init_args.height}
+      width: ${DATA.dataset.dataset_init_args.width}
+      encoding_dim: ${PRECOMPUTING.encoding_dim}  # Complex vector dimension
+      num_classes: ${DATA.dataset.dataset_init_args.num_classes}
+    # 3D SSM Architecture parameters
+    hidden_dim: 256
+    num_layers: 6  # Increased from 4 (deeper model enabled by weight sharing)
+    d_state: 128   # Increased from 64 (higher capacity for temporal dynamics)
+    d_conv: 4      # Reverted to 4 (max supported by optimized causal_conv1d kernel)
+    expand: 2      # Expansion factor in Mamba
+    share_weights: 'bidirectional' # Share weights between reverse pairs (3 groups). 6M params.
+    dropout: 0.2   # Reduced from 0.2 to prevent underfitting
+    drop_path: 0.1 # Reduced from 0.1
+    pooling_scales: [1, 2, 4]  # Multi-scale temporal pooling
+    use_checkpoint: True  # Gradient checkpointing for memory efficiency
+
+OPTIMIZER:
+  name: AdamW
+  arguments:
+    lr: 1e-3
+    weight_decay: 0.001  # Increased L2 Regularization (now excludes bias/norm)
+  gradient_accumulation:
+    enabled: True
+    scheduling: {0: 4}  # Reduced from 4 since batch_size increased from 1→2 (effective batch=4)
+  gradient_clip:
+    enabled: False
+    gradient_clip_val: 1.0
+    gradient_clip_algorithm: norm # norm or value
+  stochastic_weight_averaging:
+    enabled: False
+    swa_lrs: 1e-3
+    swa_epoch_start: 0.8
+    annealing_epochs: 20
+    annealing_strategy: cos
+
+SCHEDULER:
+  learning_rate:      # For learning rate scheduler, check document: https://docs.pytorch.org/docs/2.8/optim.html#how-to-adjust-learning-rate
+    enabled: True
+    name: CosineAnnealingLR
+    arguments:
+      T_max: ${TRAINING.max_epochs}  # Matched to max_epochs
+      eta_min: 1e-6
+  early_stopping:
+    enabled: False
+    monitor: val_loss_epoch
+    mode: min
+    patience: 5
+    min_delta: 1e-5
+  
+LOGGER:
+  log_dir_root: lightning_logs
+  experiment_name: hilbert_ssm_custom_gesture
+
+CHECKPOINT:
+  enabled: True
+  every_n_epochs: 1
+  monitor: val_top1_acc_epoch
+  mode: max
+  filename: "best-{epoch:03d}-{val_top1_acc_epoch:.5f}"
+  save_top_k: 1
+  save_last: True
+
+PRECOMPUTING:
+  # Custom gesture dataset directory (where raw data is stored)
+  # Update this path to match your actual dataset location
+  dataset_dir: /fs/nexus-projects/DVS_Actions/NatureRoboticsDataNew
+  output_dir: /fs/nexus-projects/DVS_Actions/precomputed_data/custom_gesture_downsampled_dynamic_removed
+  accumulation_interval_ms: 200.0  # Window size for splitting event stream
+  ratio_of_vectors: 0.10  # First-stage downsampling during preprocessing
+  encoding_dim: 64
+  temporal_length: 200.0  # Must match accumulation_interval_ms (explicit value to avoid type issues)
+  kernel_size: 17
+  T_scale: 25.0
+  S_scale: 25.0
+  height: 480  # Custom dataset event camera resolution
+  width: 640   # Custom dataset event camera resolution
+  num_workers: 4  # Number of workers for parallel preprocessing
+  checkpoint_every_n_samples: 50  # Save checkpoint every N samples during preprocessing
+  val_person: null  # Optional: specify validation person ID (e.g., "haowen1"), or null for default (last person)
+
+  # Downsampling configuration
+  downsample:
+    enabled: True
+    factor: 2
+    dt_us: 5000
+  
+  # Sampling strategy configuration
+  sampling_strategy: hybrid  # Options: random, activity, gradient, spatial, hybrid
+  sampling_params:
+    # Activity-based sampling (10ms window captures fine-grained gesture dynamics within 200ms intervals)
+    activity_window_ms: 10.0  # Window for local density computation (should be << accumulation_interval_ms)
+    
+    # Temporal gradient sampling
+    gradient_epsilon: 1.0  # Small value to avoid division by zero in gradient computation
+    
+    # Spatial clustering sampling
+    spatial_grid_size: 10  # Grid size in pixels for spatial binning
+    
+    # Hybrid sampling weights (set weight to 0.0 to skip that strategy and save computation)
+    hybrid_weight_activity: 0.4  # Weight for activity-based sampling
+    hybrid_weight_gradient: 0.4  # Weight for temporal gradient sampling
+    hybrid_weight_spatial: 0.2   # Weight for spatial clustering sampling
+  
+  # Sequence filtering configuration
+  # Allows you to select specific subsets of sequences based on recording conditions
+  # Each option can be: specific value, list of values, or "both"/"all" for no filtering
+  filter:
+    view: both         # Options: "TOP", "SIDE", "both", or ["TOP", "SIDE"]
+    lighting: both     # Options: "LIGHT", "DARK", "both", or ["LIGHT", "DARK"]
+    background: STATIC   # Options: "STATIC", "DYNAMIC", "both", or ["STATIC", "DYNAMIC"]
+                       # Note: Setting background="STATIC" reduces dataset size by ~50%

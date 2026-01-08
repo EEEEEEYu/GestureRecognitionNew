@@ -128,6 +128,7 @@ def _build_trainer_kwargs(cfg: AppConfig, logger: TensorBoardLogger, callbacks: 
         "max_epochs": training_cfg.max_epochs,
         "deterministic": training_cfg.deterministic,
         "inference_mode": training_cfg.inference_mode,
+        "precision": training_cfg.precision,
         "logger": logger,
         "callbacks": callbacks,
         "accelerator": distributed_cfg.accelerator,

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 
 @dataclass
@@ -32,3 +32,8 @@ class PrecomputingConfig:
     width: int = 128
     num_workers: int = 4
     checkpoint_every_n_samples: int = 50
+    val_person: Optional[str] = None
+    downsample: Optional[Dict[str, Any]] = None
+    sampling_strategy: str = "random"
+    sampling_params: Dict[str, Any] = field(default_factory=dict)
+    filter: Optional[Dict[str, Any]] = None

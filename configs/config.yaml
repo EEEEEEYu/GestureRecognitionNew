@@ -4,7 +4,7 @@ TRAINING:
   inference_mode: False  # If this one is True, use inference
   seed: 42
   max_epochs: 100 # Increased from 50
-  label_smoothing: 0.00 # Soft targets to prevent overconfidence
+  label_smoothing: 0.05 # Soft targets to prevent overconfidence
   mixup_alpha: 0.0 # Reduced from 1.0. Manifold Mixup strength (alpha=1.0 is uniform [0,1])
 
 DISTRIBUTED:
@@ -28,8 +28,8 @@ DATA:
       val_ratio_of_vectors: 1.0    # Use 100% of precomputed vectors during validation
       use_flip_augmentation: False # Disabled as per request
       # Robustness Augmentations
-      aug_jitter_std: 0.25       # Coordinate Jitter (pixels/time). Moderate strength.
-      aug_drop_rate: 0.05        # Event Drop Rate (10%). Moderate strength.
+      aug_jitter_std: 0.5       # Coordinate Jitter (pixels/time). Moderate strength.
+      aug_drop_rate: 0.1        # Event Drop Rate (10%). Moderate strength.
       aug_time_scale_min: 0.8   # Temporal Scaling Min (20% faster).
       aug_time_scale_max: 1.2   # Temporal Scaling Max (20% slower).
 
