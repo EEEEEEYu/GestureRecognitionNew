@@ -88,6 +88,7 @@ def parse_sequence_name(seq_name: str) -> Dict[str, str]:
 def _numba_refractory_filter(t, x, y, last_t_grid, dt_us):
     """
     Numba optimized loop for refractory filtering.
+    POLARITY-AGNOSTIC: Treats all events at (x,y) the same regardless of polarity.
     """
     n = len(t)
     mask = np.zeros(n, dtype=np.bool_)
@@ -100,6 +101,97 @@ def _numba_refractory_filter(t, x, y, last_t_grid, dt_us):
         if ti - last_t_grid[xi, yi] > dt_us:
             mask[i] = True
             last_t_grid[xi, yi] = ti
+    return mask
+
+
+@jit(nopython=True)
+def _numba_spatial_temporal_binning(t, x, y, p, bin_size_spatial, bin_size_temporal_us):
+    """
+    Aggressive spatial-temporal binning for additional event reduction.
+    
+    For each spatial bin (e.g., 2x2 pixels) and temporal bin (e.g., 10ms):
+    - Keep only ONE event (the first one encountered)
+    - Completely ignore polarity
+    
+    This provides an additional 2-4x reduction on top of refractory filtering.
+    """
+    if len(t) == 0:
+        return np.zeros(0, dtype=np.bool_)
+    
+    # Create spatial-temporal bins
+    t_bin = t // bin_size_temporal_us
+    x_bin = x // bin_size_spatial  
+    y_bin = y // bin_size_spatial
+    
+    # Find max values for bin IDs
+    max_x_bin = x_bin.max() + 1 if len(x_bin) > 0 else 1
+    max_y_bin = y_bin.max() + 1 if len(y_bin) > 0 else 1
+    
+    # Create a hash for each bin
+    # Use a simple but effective encoding: (t_bin * max_x * max_y) + (x_bin * max_y) + y_bin
+    bin_ids = (t_bin * max_x_bin * max_y_bin) + (x_bin * max_y_bin) + y_bin
+    
+    # For each unique bin, keep only the first event
+    mask = np.zeros(len(t), dtype=np.bool_)
+    seen_bins_size = int(bin_ids.max()) + 1 if len(bin_ids) > 0 else 1
+    seen_bins = np.zeros(seen_bins_size, dtype=np.bool_)
+    
+    for i in range(len(t)):
+        bin_id = bin_ids[i]
+        if not seen_bins[bin_id]:
+            mask[i] = True
+            seen_bins[bin_id] = True
+    
+    return mask
+
+
+@jit(nopython=True)
+def _numba_noise_filter_local_density(t, x, y, spatial_radius, temporal_window_us, min_neighbors):
+    """
+    Remove isolated events (noise) based on local spatiotemporal density.
+    
+    An event is kept if it has at least min_neighbors within:
+    - Spatial radius (in pixels)
+    - Temporal window (in microseconds)
+    
+    This filters out scattered noise BEFORE spatial downsampling.
+    Signal events cluster together, noise events are isolated.
+    """
+    n = len(t)
+    if n == 0:
+        return np.zeros(0, dtype=np.bool_)
+    
+    mask = np.zeros(n, dtype=np.bool_)
+    
+    for i in range(n):
+        ti = t[i]
+        xi = x[i]
+        yi = y[i]
+        
+        # Count neighbors within spatiotemporal window
+        neighbor_count = 0
+        
+        # Only check nearby events in time (optimization)
+        for j in range(max(0, i - 100), min(n, i + 100)):
+            if i == j:
+                continue
+            
+            # Check temporal distance
+            dt = abs(t[j] - ti)
+            if dt > temporal_window_us:
+                continue
+            
+            # Check spatial distance
+            dx = abs(x[j] - xi)
+            dy = abs(y[j] - yi)
+            
+            if dx <= spatial_radius and dy <= spatial_radius:
+                neighbor_count += 1
+                
+                if neighbor_count >= min_neighbors:
+                    mask[i] = True
+                    break
+    
     return mask
 
 
@@ -557,8 +649,15 @@ class CustomGesturePreprocessorUltra:
     
     def fast_geometry_downsample(self, events_t, events_x, events_y, events_p):
         """
-        Highly optimized downsampling: Bit-shift for space, Time-map for geometry.
-        Adapts the user's provided logic to working with separate arrays.
+        POLARITY-AGNOSTIC downsampling with NOISE FILTERING for VecKM representation.
+        
+        Pipeline:
+        0. Noise filtering (remove isolated events BEFORE downsampling)
+        1. Spatial downsampling (4x via bit-shift)
+        2. Polarity-agnostic refractory filtering (merge ON/OFF events)
+        3. Spatial-temporal binning (additional reduction)
+        
+        Expected reduction: 20-40x total
         """
         if not self.downsample_config['enabled']:
             return events_t, events_x, events_y, events_p
@@ -569,19 +668,38 @@ class CustomGesturePreprocessorUltra:
         if factor <= 1:
             return events_t, events_x, events_y, events_p
 
-        # 1. Spatial downsample via bit-shifting
-        # We use this to compute the 'low res' coordinates for the grid check
+        # Get optional parameters
+        temporal_bin_us = self.downsample_config.get('temporal_bin_us', 10000)
+        noise_filter_enabled = self.downsample_config.get('noise_filter_enabled', True)
+        noise_spatial_radius = self.downsample_config.get('noise_spatial_radius', 5)
+        noise_temporal_window_us = self.downsample_config.get('noise_temporal_window_us', 50000)
+        noise_min_neighbors = self.downsample_config.get('noise_min_neighbors', 2)
+
+        # STAGE 0: Noise filtering (BEFORE downsampling to prevent noise from filling bins)
+        if noise_filter_enabled and len(events_t) > 0:
+            noise_mask = _numba_noise_filter_local_density(
+                events_t, events_x, events_y,
+                spatial_radius=noise_spatial_radius,
+                temporal_window_us=noise_temporal_window_us,
+                min_neighbors=noise_min_neighbors
+            )
+            events_t = events_t[noise_mask]
+            events_x = events_x[noise_mask]
+            events_y = events_y[noise_mask]
+            events_p = events_p[noise_mask]
+            
+            if len(events_t) == 0:
+                return events_t, events_x, events_y, events_p
+
+        # STAGE 1: Spatial downsampling via bit-shifting
         shift = int(np.log2(factor))
         lr_x = events_x.astype(np.int32) >> shift
         lr_y = events_y.astype(np.int32) >> shift
         
-        # 2. Geometry preservation via Refractory Window
-        # Grid size matches the downsampled resolution
-        # Use ceil to ensure we cover all pixels if not perfectly divisible
+        # STAGE 2: Polarity-agnostic refractory filter  
         grid_w = (self.width + factor - 1) // factor
         grid_h = (self.height + factor - 1) // factor
         
-        # Safely handle potential out-of-bounds due to clip/shift mismatch
         max_lr_x = lr_x.max() if len(lr_x) > 0 else 0
         max_lr_y = lr_y.max() if len(lr_y) > 0 else 0
         
@@ -590,10 +708,28 @@ class CustomGesturePreprocessorUltra:
         
         last_t = np.zeros((actual_grid_w, actual_grid_h), dtype=np.int64)
         
-        # Call Numba function
-        mask = _numba_refractory_filter(events_t, lr_x, lr_y, last_t, dt_us)
+        # POLARITY-AGNOSTIC: Ignore polarity when filtering
+        mask1 = _numba_refractory_filter(events_t, lr_x, lr_y, last_t, dt_us)
         
-        return events_t[mask], events_x[mask], events_y[mask], events_p[mask]
+        # Apply refractory filter
+        t_filtered = events_t[mask1]
+        x_filtered = events_x[mask1]
+        y_filtered = events_y[mask1]
+        p_filtered = events_p[mask1]
+        lr_x_filtered = lr_x[mask1]
+        lr_y_filtered = lr_y[mask1]
+        
+        # STAGE 3: Spatial-temporal binning for super aggressive reduction
+        if len(t_filtered) > 0:
+            mask2 = _numba_spatial_temporal_binning(
+                t_filtered, lr_x_filtered, lr_y_filtered, p_filtered,
+                bin_size_spatial=2,
+                bin_size_temporal_us=temporal_bin_us
+            )
+            
+            return t_filtered[mask2], x_filtered[mask2], y_filtered[mask2], p_filtered[mask2]
+        else:
+            return t_filtered, x_filtered, y_filtered, p_filtered
     
 
     def encode_sequence(self, seq_name: str) -> Dict:

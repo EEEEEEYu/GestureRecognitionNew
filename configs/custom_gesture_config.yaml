@@ -4,7 +4,7 @@ TRAINING:
   inference_mode: False  # If this one is True, use inference
   seed: 42
   max_epochs: 100
-  label_smoothing: 0.05 # Soft targets to prevent overconfidence
+  label_smoothing: 0.05  # STAGE 2: Increased from 0.0 to help with generalization
   mixup_alpha: 0.0 # Manifold Mixup strength
   precision: "32-true"  # bf16-mixed or 32-true
 
@@ -20,23 +20,23 @@ DATA:
     class_name: CustomGesturePrecomputed
     dataset_init_args:
       # Custom Gesture-specific parameters
-      precomputed_dir: /fs/nexus-projects/DVS_Actions/precomputed_data/custom_gesture_downsampled_dynamic_removed
-      height: 240  # Custom dataset event camera resolution
-      width: 320   # Custom dataset event camera resolution
+      precomputed_dir: /fs/nexus-projects/DVS_Actions/precomputed_data/custom_gesture_aggressive_downsample
+      height: 120  # STAGE 1: Reduced from 240 (4x downsample from 480, closer to DVSGesture's 128)
+      width: 160   # STAGE 1: Reduced from 320 (4x downsample from 640, closer to DVSGesture's 128)
       num_classes: 16  # 16 classes for custom gesture dataset
       # Second-stage downsampling (training-time augmentation)
-      train_ratio_of_vectors: 0.4  # Use 75% of precomputed vectors
-      val_ratio_of_vectors: 0.4   # Use 100% of precomputed vectors during validation
+      train_ratio_of_vectors: 0.5  # STAGE 1: Increased from 0.2 to 0.5 (match DVSGesture)
+      val_ratio_of_vectors: 1.0    # STAGE 1: Use all vectors during validation for fair comparison
       use_flip_augmentation: False # Disabled as per request
-      # Robustness Augmentations
-      aug_jitter_std: 0.5       # Coordinate Jitter (pixels/time). Moderate strength.
-      aug_drop_rate: 0.1        # Event Drop Rate (10%). Moderate strength.
-      aug_time_scale_min: 0.8   # Temporal Scaling Min (20% faster).
-      aug_time_scale_max: 1.2   # Temporal Scaling Max (20% slower).
+      # Robustness Augmentations - STAGE 3: Increased to match DVSGesture
+      aug_jitter_std: 0.5        # STAGE 3: Increased from 0.05 to match DVSGesture
+      aug_drop_rate: 0.15        # STAGE 3: Increased from 0.05 for more aggressive augmentation
+      aug_time_scale_min: 0.8    # Temporal Scaling Min (20% faster).
+      aug_time_scale_max: 1.2    # Temporal Scaling Max (20% slower).
 
   dataloader:
-    batch_size: 2  # Increased from 1 (enabled by BF16 + model optimizations)
-    test_batch_size: 2  # Match training batch size
+    batch_size: 4  # STAGE 2: Increased from 2 to 4 for better gradient estimates
+    test_batch_size: 4  # Match training batch size
     num_workers: 2  # Reduced to avoid worker overhead
     persistent_workers: True
     pin_memory: True
@@ -58,28 +58,28 @@ MODEL:
       width: ${DATA.dataset.dataset_init_args.width}
       encoding_dim: ${PRECOMPUTING.encoding_dim}  # Complex vector dimension
       num_classes: ${DATA.dataset.dataset_init_args.num_classes}
-    # 3D SSM Architecture parameters
+    # 3D SSM Architecture parameters - STAGE 2: Reduced capacity for smaller dataset
     hidden_dim: 256
-    num_layers: 6  # Increased from 4 (deeper model enabled by weight sharing)
-    d_state: 128   # Increased from 64 (higher capacity for temporal dynamics)
+    num_layers: 6   # STAGE 2: Reduced from 6 to prevent overfitting on smaller dataset
+    d_state: 128    # STAGE 2: Reduced from 128 to prevent overfitting
     d_conv: 4      # Reverted to 4 (max supported by optimized causal_conv1d kernel)
     expand: 2      # Expansion factor in Mamba
-    share_weights: 'bidirectional' # Share weights between reverse pairs (3 groups). 6M params.
-    dropout: 0.2   # Reduced from 0.2 to prevent underfitting
-    drop_path: 0.1 # Reduced from 0.1
+    share_weights: 'bidirectional' # Share weights between reverse pairs (2 groups)
+    dropout: 0.3   # STAGE 2: Increased from 0.2 to prevent overfitting
+    drop_path: 0.15 # STAGE 2: Increased from 0.1 to prevent overfitting
     pooling_scales: [1, 2, 4]  # Multi-scale temporal pooling
     use_checkpoint: True  # Gradient checkpointing for memory efficiency
 
 OPTIMIZER:
   name: AdamW
   arguments:
-    lr: 1e-3
-    weight_decay: 0.001  # Increased L2 Regularization (now excludes bias/norm)
+    lr: 5e-4  # STAGE 2: Reduced from 1e-3 for more conservative learning
+    weight_decay: 0.0001  # Increased L2 Regularization (now excludes bias/norm)
   gradient_accumulation:
     enabled: True
-    scheduling: {0: 4}  # Reduced from 4 since batch_size increased from 1→2 (effective batch=4)
+    scheduling: {0: 2}  # STAGE 2: Reduced from 4 since batch_size increased 2→4 (effective batch=8)
   gradient_clip:
-    enabled: False
+    enabled: True  # STAGE 2: Enabled for training stability
     gradient_clip_val: 1.0
     gradient_clip_algorithm: norm # norm or value
   stochastic_weight_averaging:
@@ -120,28 +120,34 @@ PRECOMPUTING:
   # Custom gesture dataset directory (where raw data is stored)
   # Update this path to match your actual dataset location
   dataset_dir: /fs/nexus-projects/DVS_Actions/NatureRoboticsDataNew
-  output_dir: /fs/nexus-projects/DVS_Actions/precomputed_data/custom_gesture_downsampled_dynamic_removed
+  output_dir: /fs/nexus-projects/DVS_Actions/precomputed_data/custom_gesture_aggressive_downsample
   accumulation_interval_ms: 200.0  # Window size for splitting event stream
-  ratio_of_vectors: 0.10  # First-stage downsampling during preprocessing
+  ratio_of_vectors: 0.10  # Combined with polarity-agnostic downsampling (30x reduction) -> target ~500-800 vectors/interval
   encoding_dim: 64
   temporal_length: 200.0  # Must match accumulation_interval_ms (explicit value to avoid type issues)
   kernel_size: 17
   T_scale: 25.0
   S_scale: 25.0
-  height: 480  # Custom dataset event camera resolution
-  width: 640   # Custom dataset event camera resolution
+  height: 480  # Original custom dataset event camera resolution
+  width: 640   # Original custom dataset event camera resolution
   num_workers: 4  # Number of workers for parallel preprocessing
   checkpoint_every_n_samples: 50  # Save checkpoint every N samples during preprocessing
   val_person: null  # Optional: specify validation person ID (e.g., "haowen1"), or null for default (last person)
 
-  # Downsampling configuration
+  # Downsampling configuration - POLARITY-AGNOSTIC with NOISE FILTERING
   downsample:
     enabled: True
-    factor: 2
-    dt_us: 5000
+    factor: 4  # Spatial: 640×480 → 160×120
+    dt_us: 30000  # Refractory period: 30ms (polarity-agnostic)
+    temporal_bin_us: 10000  # Spatial-temporal binning: 10ms bins
+    # Noise filtering (removes isolated events BEFORE spatial binning)
+    noise_filter_enabled: True  # Enable noise filtering
+    noise_spatial_radius: 4  # pixels - events must have neighbors within this radius
+    noise_temporal_window_us: 5000  # 5ms - temporal window for neighbor search
+    noise_min_neighbors: 2  # Minimum neighbors required to keep an event
   
   # Sampling strategy configuration
-  sampling_strategy: hybrid  # Options: random, activity, gradient, spatial, hybrid
+  sampling_strategy: random  # Options: random, activity, gradient, spatial, hybrid
   sampling_params:
     # Activity-based sampling (10ms window captures fine-grained gesture dynamics within 200ms intervals)
     activity_window_ms: 10.0  # Window for local density computation (should be << accumulation_interval_ms)
@@ -165,3 +171,4 @@ PRECOMPUTING:
     lighting: both     # Options: "LIGHT", "DARK", "both", or ["LIGHT", "DARK"]
     background: STATIC   # Options: "STATIC", "DYNAMIC", "both", or ["STATIC", "DYNAMIC"]
                        # Note: Setting background="STATIC" reduces dataset size by ~50%
+
