@@ -14,17 +14,20 @@ class VecKMSparse(nn.Module):
         S_scale: float = 25.0, 
     ):
         super().__init__()
-        self.height = height
-        self.width = width
-        self.encoding_dim = encoding_dim
-        self.temporal_length = temporal_length
-        self.kernel_size = kernel_size
-        self.radius = kernel_size // 2
+        # Convert to proper types (handles OmegaConf interpolation)
+        self.height = int(height)
+        self.width = int(width)
+        self.encoding_dim = int(encoding_dim)
+        self.temporal_length = float(temporal_length)
+        self.kernel_size = int(kernel_size)
+        self.radius = self.kernel_size // 2
         
         # Random Fourier Features
-        self.register_buffer('T', torch.randn(1, encoding_dim) * T_scale)
-        self.register_buffer('X', torch.randn(1, encoding_dim) * S_scale)
-        self.register_buffer('Y', torch.randn(1, encoding_dim) * S_scale)
+        T_scale = float(T_scale)
+        S_scale = float(S_scale)
+        self.register_buffer('T', torch.randn(1, self.encoding_dim) * T_scale)
+        self.register_buffer('X', torch.randn(1, self.encoding_dim) * S_scale)
+        self.register_buffer('Y', torch.randn(1, self.encoding_dim) * S_scale)
         
         # Precompute Spatial Kernel Weights
         self.register_buffer('kernel_weights', self._precompute_kernel())

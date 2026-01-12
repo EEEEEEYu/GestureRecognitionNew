@@ -18,6 +18,7 @@ from configs.sections import (
     LoggerConfig,
     CheckpointConfig,
     PrecomputingConfig,
+    BenchmarkingConfig,
 )
 
 @dataclass
@@ -31,6 +32,7 @@ class AppConfig(TrackedConfigMixin):
     LOGGER: LoggerConfig = field(default_factory=LoggerConfig)
     CHECKPOINT: CheckpointConfig = field(default_factory=CheckpointConfig)
     PRECOMPUTING: PrecomputingConfig = field(default_factory=PrecomputingConfig)
+    BENCHMARKING: BenchmarkingConfig = field(default_factory=BenchmarkingConfig)
 
 
 def _validate_positive(value: Any) -> bool:

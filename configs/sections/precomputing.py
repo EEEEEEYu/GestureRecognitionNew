@@ -37,3 +37,8 @@ class PrecomputingConfig:
     sampling_strategy: str = "random"
     sampling_params: Dict[str, Any] = field(default_factory=dict)
     filter: Optional[Dict[str, Any]] = None
+    
+    # Optional sections (used in preprocessing)
+    rotation_augmentation: Optional[Dict[str, Any]] = None
+    denoising: Optional[Dict[str, Any]] = None
+    sampling: Optional[Dict[str, Any]] = None

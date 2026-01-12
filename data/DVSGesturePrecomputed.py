@@ -90,6 +90,7 @@ class DVSGesturePrecomputed(data.Dataset):
         aug_time_scale_max: float = 1.0,
         height: int = 128,
         width: int = 128,
+        use_position_encoding: bool = False,
     ):
         """
         DVS Gesture Precomputed Dataset Loader.
@@ -111,6 +112,7 @@ class DVSGesturePrecomputed(data.Dataset):
         self.purpose = purpose
         self.ratio_of_vectors = ratio_of_vectors
         self.use_flip_augmentation = use_flip_augmentation
+        self.use_position_encoding = use_position_encoding
         
         # Initialize augmenter for training
         self.augmentor = None
@@ -142,16 +144,24 @@ class DVSGesturePrecomputed(data.Dataset):
             self.encoding_dim = h5f.attrs['encoding_dim']
             self.temporal_length = h5f.attrs['temporal_length']
             
+            # Load rotation metadata if available
+            self.rotation_enabled = h5f.attrs.get('rotation_enabled', False)
+            self.rotation_angles_list = list(h5f.attrs.get('rotation_angles_list', [0]))
+            
             # Load all metadata into memory for fast access
             self.labels = h5f['labels'][:].astype(np.int64)
             self.file_paths = [fp.decode('utf-8') if isinstance(fp, bytes) else fp 
                              for fp in h5f['file_paths'][:]]
             self.num_intervals = h5f['num_intervals'][:]
+            self.rotation_angles = h5f['rotation_angles'][:].astype(np.int32) if 'rotation_angles' in h5f else np.zeros(self.num_samples, dtype=np.int32)
         
         print(f"Loaded {self.num_samples} samples from {self.h5_path}")
         print(f"  Encoding dim: {self.encoding_dim}")
         print(f"  Precompute ratio (1st stage): {self.precompute_ratio}")
         print(f"  Training ratio (2nd stage): {self.ratio_of_vectors}")
+        if self.rotation_enabled:
+            print(f"  Rotation augmentation: enabled with angles {self.rotation_angles_list}")
+            print(f"  Rotation distribution: {dict(zip(*np.unique(self.rotation_angles, return_counts=True)))}")
     
     def __len__(self):
         return self.num_samples
@@ -227,6 +237,28 @@ class DVSGesturePrecomputed(data.Dataset):
         # Get label
         label = self.labels[idx]
         file_path = self.file_paths[idx]
+        
+        # Apply position encoding if enabled
+        if self.use_position_encoding and len(vectors_concatenated) > 0:
+            # Normalize coordinates to [0, 1]
+            coords_tensor = torch.from_numpy(event_coords_concatenated).float()
+            x_norm = coords_tensor[:, 0] / self.width  # x at index 0
+            y_norm = coords_tensor[:, 1] / self.height  # y at index 1
+            
+            # Normalize time relative to the interval
+            t_coords = coords_tensor[:, 2]  # t at index 2
+            t_min = t_coords.min()
+            t_max = t_coords.max()
+            t_range = t_max - t_min
+            t_norm = (t_coords - t_min) / (t_range + 1e-6) if t_range > 0 else torch.zeros_like(t_coords)
+            
+            # Convert complex vectors to real: [real, imag]
+            vectors_real = torch.view_as_real(vectors_concatenated).reshape(vectors_concatenated.shape[0], -1)
+            
+            # Concatenate: [real_part (encoding_dim), imag_part (encoding_dim), x_norm, y_norm, t_norm]
+            # Shape: (N, encoding_dim*2 + 3)
+            position_features = torch.stack([x_norm, y_norm, t_norm], dim=1)  # (N, 3)
+            vectors_concatenated = torch.cat([vectors_real, position_features], dim=1)  # (N, encoding_dim*2+3)
         
         return {
             'vectors': vectors_concatenated,

@@ -2,7 +2,6 @@ import torch.utils.data as data
 import numpy as np
 import os
 import random
-from typing import Optional
 
 GESTURE_CLASSES = [
     "hand_clapping",
@@ -22,14 +21,13 @@ CLASS_NAME_TO_INT = {name: i for i, name in enumerate(GESTURE_CLASSES)}
 INT_TO_CLASS_NAME = {i: name for i, name in enumerate(GESTURE_CLASSES)}
 
 
-class DVSGesture:
+class DVSGesture(data.Dataset):
     def __init__(
         self,
         dataset_dir: str,
         purpose: str = 'train',
         height: int = 128,
         width: int = 128,
-        num_classes: int = 10,
         use_flip_augmentation = False,
         accumulation_interval_ms = 100.0,
     ):
@@ -42,7 +40,6 @@ class DVSGesture:
             train_split: Training data split ratio
             val_split: Validation data split ratio
         """
-        assert purpose in ("train", "validation", "all")
         self.dataset_dir = dataset_dir
         self.purpose = purpose
         self.height = height
@@ -88,7 +85,7 @@ class DVSGesture:
             raise ValueError(f"Found empty events at path: {file_path}")
 
         # the raw events are int x,y,p,t order,
-        events_xy_all = events[:, 0:2].astype(np.int32)
+        events_xy_all = events[:, 0:2]
         events_t_all = events[:, 3]
         events_p_all = events[:, 2]
     
@@ -141,3 +138,21 @@ class DVSGesture:
             'augmentation_method': augmentation_method
         }
 
+
+if __name__ == "__main__":
+    # Test the dataloader
+    dataset = DVSGesture(
+        dataset_dir="/home/matt/DATA/DVSGesture/ibmGestureTrain/",
+        purpose="train"
+    )
+
+    print(f"Dataset length: {len(dataset)}")
+
+    # Get first item
+    events, label = dataset[0]
+
+    print(f"Events shape: {events.shape}")
+    print(f"Events dtype: {events.dtype}")
+    print(f"Label: {label} ({GESTURE_CLASSES[label]})")
+    print(f"First 5 events:\n{events[:5]}")
+    print(f"Event ranges - X: [{events[:, 0].min():.1f}, {events[:, 0].max():.1f}], Y: [{events[:, 1].min():.1f}, {events[:, 1].max():.1f}], Time: [{events[:, 3].min():.3f}, {events[:, 3].max():.3f}]")

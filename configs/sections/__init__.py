@@ -20,6 +20,7 @@ from .scheduler import (
 from .logger import LoggerConfig
 from .checkpoint import CheckpointConfig
 from .precomputing import PrecomputingConfig
+from .benchmarking import BenchmarkingConfig
 
 __all__ = [
     "TrainingConfig",
@@ -39,4 +40,5 @@ __all__ = [
     "LoggerConfig",
     "CheckpointConfig",
     "PrecomputingConfig",
+    "BenchmarkingConfig",
 ]

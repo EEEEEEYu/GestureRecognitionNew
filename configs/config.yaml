@@ -6,6 +6,7 @@ TRAINING:
   max_epochs: 100 # Increased from 50
   label_smoothing: 0.05 # Soft targets to prevent overconfidence
   mixup_alpha: 0.0 # Reduced from 1.0. Manifold Mixup strength (alpha=1.0 is uniform [0,1])
+  precision: "32-true"  # Full float32 precision
 
 DISTRIBUTED:
   accelerator: gpu  # Changed from cpu - Mamba2 requires CUDA
@@ -24,18 +25,22 @@ DATA:
       width: 128
       num_classes: 11  # DVSGesture has 11 classes
       # Second-stage downsampling (training-time augmentation)
-      train_ratio_of_vectors: 0.5  # Use 50% of the 30% precomputed vectors = 15% total (Changed from 0.8)
+      train_ratio_of_vectors: 0.9  # Use 50% of the 30% precomputed vectors = 15% total (Changed from 0.8)
       val_ratio_of_vectors: 1.0    # Use 100% of precomputed vectors during validation
       use_flip_augmentation: False # Disabled as per request
+      # Spatiotemporal Position Encoding
+      # When enabled, adds normalized (x, y, t) coordinates to vector features
+      # Input changes from complex64 (encoding_dim) to float32 (encoding_dim*2 + 3)
+      use_position_encoding: False
       # Robustness Augmentations
       aug_jitter_std: 0.5       # Coordinate Jitter (pixels/time). Moderate strength.
-      aug_drop_rate: 0.1        # Event Drop Rate (10%). Moderate strength.
+      aug_drop_rate: 0.05       # Event Drop Rate (10%). Moderate strength.
       aug_time_scale_min: 0.8   # Temporal Scaling Min (20% faster).
       aug_time_scale_max: 1.2   # Temporal Scaling Max (20% slower).
 
   dataloader:
-    batch_size: 8  # Reduced for memory efficiency with Mamba2
-    test_batch_size: 16  # Reduced for validation
+    batch_size: 2  # Reduced for memory efficiency with Mamba2
+    test_batch_size: 2  # Reduced for validation
     num_workers: 4  # Reduced to avoid worker overhead
     persistent_workers: True
     pin_memory: True
@@ -50,12 +55,14 @@ MODEL:
   class_name: SparseHilbertSSM
   model_init_args:
     # DVSGesture input parameters
-    encoding_dim: 64  # From SparseVKMEncoder output
+    encoding_dim: 128  # From SparseVKMEncoder output
     num_classes: ${DATA.dataset.dataset_init_args.num_classes}
+    # Position encoding flag (interpolated from DATA to ensure consistency)
+    use_position_encoding: ${DATA.dataset.dataset_init_args.use_position_encoding}
     input_meta:
       height: ${DATA.dataset.dataset_init_args.height}
       width: ${DATA.dataset.dataset_init_args.width}
-      encoding_dim: 64  # Complex vector dimension
+      encoding_dim: ${MODEL.model_init_args.encoding_dim}  # Complex vector dimension
       num_classes: ${DATA.dataset.dataset_init_args.num_classes}
     # 3D SSM Architecture parameters
     hidden_dim: 256
@@ -75,8 +82,8 @@ OPTIMIZER:
     lr: 1e-3
     weight_decay: 0.01  # Increased L2 Regularization (now excludes bias/norm)
   gradient_accumulation:
-    enabled: False
-    scheduling: {0: 4, 4: 2, 8: 1}
+    enabled: True
+    scheduling: {0: 4}
   gradient_clip:
     enabled: False
     gradient_clip_val: 1.0
@@ -118,10 +125,10 @@ CHECKPOINT:
 PRECOMPUTING:
   dataset_dir: /fs/nexus-projects/DVS_Actions/DVSGestureData
   output_dir: /fs/nexus-scratch/haowenyu/GestureRecognitionNew/precomputed_data/dvsgesture
-  accumulation_interval_ms: 200.0  # Window size for splitting event stream
-  ratio_of_vectors: 0.3  # Increased from 0.1 to allow better training-time sampling
-  encoding_dim: 64
-  temporal_length: 200.0  # Should match accumulation_interval_ms
+  accumulation_interval_ms: 100.0  # Window size for splitting event stream
+  ratio_of_vectors: 0.1  # Retention ratio for sampling (what % of denoised events to keep as queries)
+  encoding_dim: ${MODEL.model_init_args.encoding_dim}
+  temporal_length: 100.0  # Should match accumulation_interval_ms
   kernel_size: 17
   T_scale: 25.0
   S_scale: 25.0
@@ -129,3 +136,54 @@ PRECOMPUTING:
   width: 128
   num_workers: 4  # Number of workers for parallel preprocessing
   checkpoint_every_n_samples: 50  # Save checkpoint every N samples during preprocessing
+  
+  # Rotation augmentation (precomputed)
+  # Rotations are applied to raw events BEFORE VKM encoding to preserve geometric structure
+  rotation_augmentation:
+    enabled: False
+    angles: [0, 90, 180, 270]  # Cardinal rotations in degrees
+    mode: separate  # Store each rotation as a separate sample (simpler dataloader)
+    augment_validation: False  # Only augment training data, keep validation at 0° only
+  
+  
+  # Denoising parameters (applied BEFORE sampling)
+  # Use benchmark_denoising.py to find optimal parameters for your dataset
+  denoising:
+    enabled: True  # Set to False to disable denoising
+    grid_size: 2  # Spatial grid size for noise filtering (pixels)
+    threshold: 6  # Minimum events per grid cell to survive filtering
+  
+  # Sampling strategy for query selection
+  # Determines how to select which events become query vectors for VecKM encoding
+  # Applied AFTER denoising
+  sampling:
+    method: grid_decimation  # Options: 'random', 'grid_decimation' (recommended)
+    
+    # Grid decimation parameters (used when method=grid_decimation)
+    # This method uses stratified sampling with retention_ratio from ratio_of_vectors above
+    grid_decimation:
+      grid_size: 2  # Spatial grid size for stratified sampling (smaller = finer sampling)
+
+BENCHMARKING:
+  # Benchmark settings for automated parameter search
+  # These control both denoising and sampling benchmarks
+  
+  num_samples: 100  # Number of dataset samples to use for benchmarking
+  
+  # Denoising benchmark parameter ranges
+  denoising:
+    grid_sizes: [2, 3, 4, 5, 6, 8, 10]
+    thresholds: [1, 2, 3, 4, 5, 6]
+  
+  # Sampling benchmark parameter ranges
+  sampling:
+    grid_sizes: [2, 3, 4, 6, 8, 10, 12]
+    retention_ratios: [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.08, 0.1]
+  
+  # Intermediate denoised data storage (for decoupled benchmarking)
+  # After denoising benchmark, run preprocess_denoise_only.py to save denoised events
+  # Then sampling benchmark will load from this directory
+  denoised_cache_dir: /fs/nexus-scratch/haowenyu/GestureRecognitionNew/precomputed_data/denoised_cache
+
+
+
