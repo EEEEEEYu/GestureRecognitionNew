@@ -28,7 +28,7 @@ from scipy.stats import pearsonr
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data.DVSGesture import DVSGesture
+
 from utils.denoising_and_sampling import sample_grid_decimation_fast
 
 

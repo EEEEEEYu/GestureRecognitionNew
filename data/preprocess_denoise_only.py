@@ -27,7 +27,7 @@ from typing import Dict
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data.DVSGesture import DVSGesture
+from data import get_dataset_class
 from utils.denoising_and_sampling import filter_noise_spatial
 
 
@@ -108,7 +108,10 @@ class DenoiseOnlyPreprocessor:
         print(f"{'='*60}")
         
         # Load dataset
-        dataset = DVSGesture(
+        # Load dataset
+        dataset_cls = get_dataset_class(self.config.get('dataset', 'dvsgesture')) # or infer from config
+        
+        dataset = dataset_cls(
             dataset_dir=self.dataset_dir,
             purpose=purpose,
             height=self.height,

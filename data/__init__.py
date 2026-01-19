@@ -12,10 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .DVSGesture import DVSGesture
-from .DVSGesturePrecomputed import DVSGesturePrecomputed, collate_fn
+from .dvsgesture.dataset import DVSGesture
+from .dvsgesture.dataset_precomputed import DVSGesturePrecomputed, collate_fn
 from .SparseVKMEncoder import VecKMSparse
 from .create_datasets import create_dvsgesture_datasets, create_dvsgesture_dataloaders
+
+
+def get_dataset_class(name: str):
+    if name.lower() == 'dvsgesture':
+        from .dvsgesture.dataset import DVSGesture
+        return DVSGesture
+    # Placeholder for HARDVS
+    # elif name.lower() == 'hardvs':
+    #     from .hardvs.dataset import HARDVS
+    #     return HARDVS
+    else:
+        raise ValueError(f"Unknown dataset: {name}")
 
 __all__ = [
     'DVSGesture',
@@ -24,4 +36,5 @@ __all__ = [
     'collate_fn',
     'create_dvsgesture_datasets',
     'create_dvsgesture_dataloaders',
+    'get_dataset_class',
 ]

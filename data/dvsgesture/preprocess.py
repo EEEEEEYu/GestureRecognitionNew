@@ -24,7 +24,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data.DVSGesture import DVSGesture
+from data.dvsgesture.dataset import DVSGesture
 from data.SparseVKMEncoderOptimized import VecKMSparseOptimized
 from utils.event_augmentation import rotate_sliced_events
 from utils.denoising_and_sampling import filter_noise_spatial, sample_grid_decimation_fast

@@ -34,14 +34,14 @@ DATA:
       use_position_encoding: False
       # Robustness Augmentations
       aug_jitter_std: 0.5       # Coordinate Jitter (pixels/time). Moderate strength.
-      aug_drop_rate: 0.05       # Event Drop Rate (10%). Moderate strength.
+      aug_drop_rate: 0.1        # Event Drop Rate (10%). Moderate strength.
       aug_time_scale_min: 0.8   # Temporal Scaling Min (20% faster).
       aug_time_scale_max: 1.2   # Temporal Scaling Max (20% slower).
 
   dataloader:
-    batch_size: 2  # Reduced for memory efficiency with Mamba2
-    test_batch_size: 2  # Reduced for validation
-    num_workers: 4  # Reduced to avoid worker overhead
+    batch_size: 8  # Reduced for memory efficiency with Mamba2
+    test_batch_size: 8  # Reduced for validation
+    num_workers: 8  # Reduced to avoid worker overhead
     persistent_workers: True
     pin_memory: True
     multiprocessing_context: fork
@@ -82,7 +82,7 @@ OPTIMIZER:
     lr: 1e-3
     weight_decay: 0.01  # Increased L2 Regularization (now excludes bias/norm)
   gradient_accumulation:
-    enabled: True
+    enabled: False
     scheduling: {0: 4}
   gradient_clip:
     enabled: False
@@ -125,16 +125,16 @@ CHECKPOINT:
 PRECOMPUTING:
   dataset_dir: /fs/nexus-projects/DVS_Actions/DVSGestureData
   output_dir: /fs/nexus-scratch/haowenyu/GestureRecognitionNew/precomputed_data/dvsgesture
-  accumulation_interval_ms: 100.0  # Window size for splitting event stream
+  accumulation_interval_ms: 200.0  # Window size for splitting event stream
   ratio_of_vectors: 0.1  # Retention ratio for sampling (what % of denoised events to keep as queries)
   encoding_dim: ${MODEL.model_init_args.encoding_dim}
-  temporal_length: 100.0  # Should match accumulation_interval_ms
+  temporal_length: 200.0  # Should match accumulation_interval_ms
   kernel_size: 17
   T_scale: 25.0
   S_scale: 25.0
   height: 128
   width: 128
-  num_workers: 4  # Number of workers for parallel preprocessing
+  num_workers: 8  # Number of workers for parallel preprocessing
   checkpoint_every_n_samples: 50  # Save checkpoint every N samples during preprocessing
   
   # Rotation augmentation (precomputed)
@@ -149,7 +149,7 @@ PRECOMPUTING:
   # Denoising parameters (applied BEFORE sampling)
   # Use benchmark_denoising.py to find optimal parameters for your dataset
   denoising:
-    enabled: True  # Set to False to disable denoising
+    enabled: False  # Set to False to disable denoising
     grid_size: 2  # Spatial grid size for noise filtering (pixels)
     threshold: 6  # Minimum events per grid cell to survive filtering
   
@@ -157,7 +157,7 @@ PRECOMPUTING:
   # Determines how to select which events become query vectors for VecKM encoding
   # Applied AFTER denoising
   sampling:
-    method: grid_decimation  # Options: 'random', 'grid_decimation' (recommended)
+    method: random  # Options: 'random', 'grid_decimation' (recommended)
     
     # Grid decimation parameters (used when method=grid_decimation)
     # This method uses stratified sampling with retention_ratio from ratio_of_vectors above

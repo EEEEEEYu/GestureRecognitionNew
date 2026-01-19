@@ -26,7 +26,7 @@ import json
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data.DVSGesture import DVSGesture
+from data import get_dataset_class
 from utils.denoising_and_sampling import filter_noise_spatial
 
 
@@ -265,14 +265,20 @@ class DenoisingBenchmark:
         print(f"Number of samples: {num_samples}")
         
         # Load dataset
-        dataset = DVSGesture(
-            dataset_dir=self.dataset_dir,
-            purpose='train',
-            height=self.height,
-            width=self.width,
-            use_flip_augmentation=False,
-            accumulation_interval_ms=self.accumulation_interval_ms
-        )
+        dataset_cls = get_dataset_class(self.dataset_name)
+        
+        # Determine dataset arguments based on config
+        # This assumes all datasets share a similar init signature, or we can handle specifics here
+        dataset_args = {
+            'dataset_dir': self.dataset_dir,
+            'purpose': 'train',
+            'height': self.height,
+            'width': self.width,
+            'use_flip_augmentation': False,
+            'accumulation_interval_ms': self.accumulation_interval_ms
+        }
+        
+        dataset = dataset_cls(**dataset_args)
         
         # Limit number of samples
         num_samples = min(num_samples, len(dataset))
