@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dataset import UCF101_DVS, UCF101_CLASSES
 
 
-def visualize_event_frames(events_xy_sliced, events_p_sliced, height, width, num_frames=10):
+def visualize_event_frames(events_xy_sliced, events_p_sliced, height, width, num_frames=10, min_events=100):
     """
     Visualize event frames as accumulated images.
     
@@ -27,15 +27,34 @@ def visualize_event_frames(events_xy_sliced, events_p_sliced, height, width, num
         events_p_sliced: List of event polarities for each interval  
         height, width: Sensor dimensions
         num_frames: Number of frames to visualize
+        min_events: Minimum events per interval to consider (default: 100)
     """
-    num_intervals = min(len(events_xy_sliced), num_frames)
+    # Find intervals with enough events
+    valid_intervals = []
+    for i in range(len(events_xy_sliced)):
+        if len(events_xy_sliced[i]) >= min_events:
+            valid_intervals.append(i)
+    
+    if len(valid_intervals) == 0:
+        print(f"Warning: No intervals with >={min_events} events found!")
+        # Fall back to showing all intervals
+        valid_intervals = list(range(len(events_xy_sliced)))
+    
+    # Select evenly spaced intervals from valid ones
+    if len(valid_intervals) > num_frames:
+        step = len(valid_intervals) // num_frames
+        selected_intervals = [valid_intervals[i * step] for i in range(num_frames)]
+    else:
+        selected_intervals = valid_intervals[:num_frames]
+    
+    num_intervals = len(selected_intervals)
     
     fig, axes = plt.subplots(2, (num_intervals + 1) // 2, figsize=(15, 6))
     axes = axes.flatten() if num_intervals > 1 else [axes]
     
-    for i in range(num_intervals):
-        events_xy = events_xy_sliced[i]
-        events_p = events_p_sliced[i]
+    for plot_idx, interval_idx in enumerate(selected_intervals):
+        events_xy = events_xy_sliced[interval_idx]
+        events_p = events_p_sliced[interval_idx]
         
         # Create accumulation frame
         frame = np.zeros((height, width, 3), dtype=np.uint8)
@@ -55,9 +74,9 @@ def visualize_event_frames(events_xy_sliced, events_p_sliced, height, width, num
                 else:  # OFF event
                     frame[y[j], x[j], 2] = 255  # Blue channel
         
-        axes[i].imshow(frame)
-        axes[i].set_title(f'Interval {i}')
-        axes[i].axis('off')
+        axes[plot_idx].imshow(frame)
+        axes[plot_idx].set_title(f'Interval {interval_idx} ({len(events_xy)} events)')
+        axes[plot_idx].axis('off')
     
     # Hide unused subplots
     for i in range(num_intervals, len(axes)):
@@ -114,7 +133,7 @@ def main():
         purpose=args.purpose,
         height=180,
         width=240,
-        accumulation_interval_ms=100.0,
+        accumulation_interval_ms=50.0,
     )
     
     print(f"Dataset size: {len(dataset)} samples")
