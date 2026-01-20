@@ -20,7 +20,7 @@ DATA:
     class_name: DVSGesturePrecomputed
     dataset_init_args:
       # DVSGesture-specific parameters
-      precomputed_dir: /fs/nexus-scratch/haowenyu/GestureRecognitionNew/precomputed_data/dvsgesture
+      precomputed_dir: /fs/nexus-projects/DVS_Actions/DVSGestureData/DVSGesture_precomputed_data
       height: 128
       width: 128
       num_classes: 11  # DVSGesture has 11 classes
@@ -124,7 +124,7 @@ CHECKPOINT:
 
 PRECOMPUTING:
   dataset_dir: /fs/nexus-projects/DVS_Actions/DVSGestureData
-  output_dir: /fs/nexus-scratch/haowenyu/GestureRecognitionNew/precomputed_data/dvsgesture
+  output_dir: /fs/nexus-projects/DVS_Actions/DVSGestureData/DVSGesture_precomputed_data
   accumulation_interval_ms: 200.0  # Window size for splitting event stream
   ratio_of_vectors: 0.1  # Retention ratio for sampling (what % of denoised events to keep as queries)
   encoding_dim: ${MODEL.model_init_args.encoding_dim}
@@ -183,7 +183,7 @@ BENCHMARKING:
   # Intermediate denoised data storage (for decoupled benchmarking)
   # After denoising benchmark, run preprocess_denoise_only.py to save denoised events
   # Then sampling benchmark will load from this directory
-  denoised_cache_dir: /fs/nexus-scratch/haowenyu/GestureRecognitionNew/precomputed_data/denoised_cache
+  denoised_cache_dir: /fs/nexus-projects/DVS_Actions/DVSGestureData/DVSGesture_precomputed_data/DVSGesture_denoised_cache
 
 
 
