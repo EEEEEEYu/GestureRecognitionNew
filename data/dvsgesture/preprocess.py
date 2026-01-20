@@ -22,7 +22,8 @@ from typing import Dict, List, Tuple
 from pathlib import Path
 
 # Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, project_root)
 
 from data.dvsgesture.dataset import DVSGesture
 from data.SparseVKMEncoderOptimized import VecKMSparseOptimized
@@ -151,6 +152,13 @@ class DVSGesturePreprocessor:
         # Extract separate x, y coordinates
         events_y = events_xy[:, 1]
         events_x = events_xy[:, 0]
+        
+        # ===================================================================
+        # BOUNDS CHECKING: Clip coordinates to valid range
+        # Some event data may contain out-of-bounds events due to sensor noise
+        # ===================================================================
+        events_x = np.clip(events_x, 0, self.width - 1)
+        events_y = np.clip(events_y, 0, self.height - 1)
         
         # ===================================================================
         # STAGE 1: DENOISING (Optional, Pure Numpy)

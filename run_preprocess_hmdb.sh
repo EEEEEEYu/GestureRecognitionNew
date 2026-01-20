@@ -7,7 +7,7 @@ echo "Starting HMDB-DVS preprocessing..."
 echo "This will use the 'torch' conda environment"
 echo ""
 
-mamba run -n torch python data/HMDB/preprocess.py --config configs/config_hmdb.yaml
+mamba run -n torch python data/HMDB_DVS/preprocess.py --config configs/config_hmdb.yaml
 
 echo ""
 echo "Preprocessing complete!"

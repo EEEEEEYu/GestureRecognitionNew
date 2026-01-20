@@ -21,8 +21,8 @@ DATA:
     dataset_init_args:
       # DVSGesture-specific parameters
       precomputed_dir: /fs/nexus-projects/DVS_Actions/HMDB_DVS/HMDB_precomputed_data
-      height: 128
-      width: 128
+      height: 180
+      width: 240
       num_classes: 11  # DVSGesture has 11 classes
       # Second-stage downsampling (training-time augmentation)
       train_ratio_of_vectors: 0.9  # Use 50% of the 30% precomputed vectors = 15% total (Changed from 0.8)
@@ -55,7 +55,7 @@ MODEL:
   class_name: SparseHilbertSSM
   model_init_args:
     # DVSGesture input parameters
-    encoding_dim: 128  # From SparseVKMEncoder output
+    encoding_dim: 64  # From SparseVKMEncoder output
     num_classes: ${DATA.dataset.dataset_init_args.num_classes}
     # Position encoding flag (interpolated from DATA to ensure consistency)
     use_position_encoding: ${DATA.dataset.dataset_init_args.use_position_encoding}
@@ -132,8 +132,8 @@ PRECOMPUTING:
   kernel_size: 17
   T_scale: 25.0
   S_scale: 25.0
-  height: 128
-  width: 128
+  height: 180
+  width: 240
   num_workers: 8  # Number of workers for parallel preprocessing
   checkpoint_every_n_samples: 50  # Save checkpoint every N samples during preprocessing
   

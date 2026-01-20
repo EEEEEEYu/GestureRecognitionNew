@@ -130,7 +130,7 @@ class VecKMSparseOptimized(nn.Module):
         # OPTIMIZATION: Process queries in batches to avoid OOM
         # With 600K events, processing all at once requires ~18GB GPU memory
         # Batch size of 5000 queries keeps memory usage under ~150MB per batch
-        batch_size = 10000
+        batch_size = 25600
         num_batches = (num_queries + batch_size - 1) // batch_size
         
         out_emb_list = []

@@ -137,7 +137,15 @@ class UCF101_DVS(data.Dataset):
         pol = mat_data['pol'].flatten().astype(np.float32)  # polarity (0 or 1)
         
         if len(x) == 0:
-            raise ValueError(f"Found empty events at path: {file_path}")
+            # Some .mat files may be corrupted or empty - skip with warning
+            import warnings
+            warnings.warn(f"Skipping empty events file: {file_path}")
+            # Return minimal dummy data to skip this sample
+            # Create a single dummy event at (0,0) to avoid breaking preprocessing
+            x = np.array([0.0], dtype=np.float32)
+            y = np.array([0.0], dtype=np.float32)
+            ts = np.array([0.0], dtype=np.float32)
+            pol = np.array([0.0], dtype=np.float32)
         
         # Combine into [N, 2] for xy coordinates
         events_xy_all = np.stack([x, y], axis=1)

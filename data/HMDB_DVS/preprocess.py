@@ -22,9 +22,10 @@ from typing import Dict, List, Tuple
 from pathlib import Path
 
 # Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, project_root)
 
-from data.HMDB.dataset import HMDB_DVS
+from data.HMDB_DVS.dataset import HMDB_DVS
 from data.SparseVKMEncoderOptimized import VecKMSparseOptimized
 from utils.event_augmentation import rotate_sliced_events
 from utils.denoising_and_sampling import filter_noise_spatial, sample_grid_decimation_fast
@@ -151,6 +152,13 @@ class HMDBPreprocessor:
         # Extract separate x, y coordinates
         events_y = events_xy[:, 1]
         events_x = events_xy[:, 0]
+        
+        # ===================================================================
+        # BOUNDS CHECKING: Clip coordinates to valid range
+        # Some AEDAT files may contain out-of-bounds events due to sensor noise
+        # ===================================================================
+        events_x = np.clip(events_x, 0, self.width - 1)
+        events_y = np.clip(events_y, 0, self.height - 1)
         
         # ===================================================================
         # STAGE 1: DENOISING (Optional, Pure Numpy)
@@ -375,13 +383,14 @@ class HMDBPreprocessor:
             
             sample_counter = 0  # Track actual HDF5 sample index
             for idx in pbar:
-                # Load sample once
-                sample = dataset[idx]
-                
-                # Generate rotated versions
-                for rotation_angle in angles_to_use:
-                    # Encode sample with rotation
-                    encoded_sample = self.encode_sample(sample, rotation_angle=rotation_angle)
+                try:
+                    # Load sample once
+                    sample = dataset[idx]
+                    
+                    # Generate rotated versions
+                    for rotation_angle in angles_to_use:
+                        # Encode sample with rotation
+                        encoded_sample = self.encode_sample(sample, rotation_angle=rotation_angle)
                     
                     # Create a group for this sample
                     sample_group = h5f.create_group(f'sample_{sample_counter:06d}')
@@ -427,6 +436,15 @@ class HMDBPreprocessor:
                     )
                     
                     sample_counter += 1
+                
+                except Exception as e:
+                    print(f"\n❌ Error processing sample {idx}:")
+                    print(f"   File: {sample.get('file_path', 'unknown')}")
+                    print(f"   Error: {str(e)}")
+                    # Save checkpoint before failing
+                    checkpoint_state[purpose]['processed_samples'] = idx
+                    self.save_checkpoint_state(checkpoint_state)
+                    raise
                 
                 # Update checkpoint every N original samples
                 if (idx + 1) % self.checkpoint_every_n == 0:

@@ -7,7 +7,7 @@ echo "Starting DVSGesture preprocessing..."
 echo "This will use the 'torch' conda environment"
 echo ""
 
-mamba run -n torch python data/preprocess_dvsgesture.py --config configs/config_dvsgesture.yaml
+mamba run -n torch python data/dvsgesture/preprocess.py --config configs/config_dvsgesture.yaml
 
 echo ""
 echo "Preprocessing complete!"
