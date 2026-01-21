@@ -109,8 +109,30 @@ class UCF101_DVS(data.Dataset):
             else:
                 raise ValueError(f"Unknown purpose: {purpose}")
             
-            # Add all clips from selected videos
+            # PRE-SCAN: Detect corrupted video sequences
+            # If any clip from a video sequence is corrupted,exclude the entire sequence
+            corrupted_videos = set()
             for group_id in selected_groups:
+                for file_path in video_groups[group_id]:
+                    try:
+                        # Quick check: load and verify file has events
+                        mat_data = loadmat(str(file_path))
+                        x = mat_data.get('x', np.array([]))
+                        if len(x) == 0:
+                            # Empty file - mark entire video sequence as corrupted
+                            corrupted_videos.add(group_id)
+                            print(f"⚠️  Excluding video sequence g{group_id} from {class_name} (empty file: {file_path.name})")
+                            break  # No need to check other clips from this video
+                    except Exception as e:
+                        # File loading failed - mark entire video sequence as corrupted
+                        corrupted_videos.add(group_id)
+                        print(f"⚠️  Excluding video sequence g{group_id} from {class_name} (load error: {file_path.name})")
+                        break
+            
+            # Add clips only from non-corrupted video sequences
+            for group_id in selected_groups:
+                if group_id in corrupted_videos:
+                    continue  # Skip entire corrupted video sequence
                 for file_path in video_groups[group_id]:
                     self.all_seqs.append(str(file_path))
                     self.all_labels.append(class_idx)
@@ -136,16 +158,11 @@ class UCF101_DVS(data.Dataset):
         ts = mat_data['ts'].flatten().astype(np.float32)  # timestamps in microseconds
         pol = mat_data['pol'].flatten().astype(np.float32)  # polarity (0 or 1)
         
+        
+        # All corrupted files have been filtered out during __init__,
+        # so this should never be empty. If it is, raise an error.
         if len(x) == 0:
-            # Some .mat files may be corrupted or empty - skip with warning
-            import warnings
-            warnings.warn(f"Skipping empty events file: {file_path}")
-            # Return minimal dummy data to skip this sample
-            # Create a single dummy event at (0,0) to avoid breaking preprocessing
-            x = np.array([0.0], dtype=np.float32)
-            y = np.array([0.0], dtype=np.float32)
-            ts = np.array([0.0], dtype=np.float32)
-            pol = np.array([0.0], dtype=np.float32)
+            raise ValueError(f"Unexpected empty events (should have been filtered): {file_path}")
         
         # Combine into [N, 2] for xy coordinates
         events_xy_all = np.stack([x, y], axis=1)

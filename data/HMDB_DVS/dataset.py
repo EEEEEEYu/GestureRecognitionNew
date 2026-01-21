@@ -147,13 +147,11 @@ class HMDB_DVS(data.Dataset):
         # Returns [N, 4] array: [x, y, t, p]
         events = read_aedat2_with_dynamic_parsing(file_path, expected_width=self.width, expected_height=self.height)
         
+        
+        # All corrupted files have been filtered out during __init__,
+        # so this should never be empty. If it is, raise an error.
         if len(events) == 0:
-            # Some .aedat files may be corrupted or empty - skip with warning
-            import warnings
-            warnings.warn(f"Skipping empty events file: {file_path}")
-            # Return minimal dummy data to skip this sample
-            # Create a single dummy event at (0,0) to avoid breaking preprocessing
-            events = np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32)  # [x, y, t, p]
+            raise ValueError(f"Unexpected empty events (should have been filtered): {file_path}")
         
         # Extract event components
         events_xy_all = events[:, 0:2]  # [N, 2] - x, y coordinates

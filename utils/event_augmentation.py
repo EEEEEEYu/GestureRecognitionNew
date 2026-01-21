@@ -19,7 +19,8 @@ def rotate_events_90deg(
     """
     Rotate events 90 degrees clockwise around image center.
     
-    Uses integer arithmetic for exact transformation.
+    For non-square resolutions, coordinates are clipped to fit within the original
+    resolution bounds, maintaining the encoder's expected dimensions.
     
     Args:
         events_xy: Event coordinates [N, 2] with columns [x, y]
@@ -30,25 +31,25 @@ def rotate_events_90deg(
     
     Returns:
         Tuple of (rotated_xy, timestamps, polarities)
-        Out-of-bounds events are filtered out.
     """
     if len(events_xy) == 0:
         return events_xy.copy(), events_t.copy(), events_p.copy()
     
     # 90° clockwise: (x, y) -> (y, width - 1 - x)
-    # Note: For DVSGesture (128x128), this maps correctly
     x = events_xy[:, 0]
     y = events_xy[:, 1]
     
     new_x = y
     new_y = width - 1 - x
     
-    # Filter out-of-bounds events
-    valid_mask = (new_x >= 0) & (new_x < width) & (new_y >= 0) & (new_y < height)
+    # Clip coordinates to fit within the ORIGINAL resolution (width × height)
+    # This maintains the encoder's expected resolution for non-square images
+    new_x = np.clip(new_x, 0, width - 1)
+    new_y = np.clip(new_y, 0, height - 1)
     
-    rotated_xy = np.stack([new_x[valid_mask], new_y[valid_mask]], axis=1).astype(events_xy.dtype)
-    rotated_t = events_t[valid_mask]
-    rotated_p = events_p[valid_mask]
+    rotated_xy = np.stack([new_x, new_y], axis=1).astype(events_xy.dtype)
+    rotated_t = events_t.copy()
+    rotated_p = events_p.copy()
     
     return rotated_xy, rotated_t, rotated_p
 
@@ -63,8 +64,6 @@ def rotate_events_180deg(
     """
     Rotate events 180 degrees around image center.
     
-    Uses integer arithmetic for exact transformation.
-    
     Args:
         events_xy: Event coordinates [N, 2] with columns [x, y]
         events_t: Event timestamps [N]
@@ -74,7 +73,6 @@ def rotate_events_180deg(
     
     Returns:
         Tuple of (rotated_xy, timestamps, polarities)
-        Out-of-bounds events are filtered out.
     """
     if len(events_xy) == 0:
         return events_xy.copy(), events_t.copy(), events_p.copy()
@@ -86,12 +84,13 @@ def rotate_events_180deg(
     new_x = width - 1 - x
     new_y = height - 1 - y
     
-    # Filter out-of-bounds events
-    valid_mask = (new_x >= 0) & (new_x < width) & (new_y >= 0) & (new_y < height)
+    # Clip to ensure coordinates stay within bounds
+    new_x = np.clip(new_x, 0, width - 1)
+    new_y = np.clip(new_y, 0, height - 1)
     
-    rotated_xy = np.stack([new_x[valid_mask], new_y[valid_mask]], axis=1).astype(events_xy.dtype)
-    rotated_t = events_t[valid_mask]
-    rotated_p = events_p[valid_mask]
+    rotated_xy = np.stack([new_x, new_y], axis=1).astype(events_xy.dtype)
+    rotated_t = events_t.copy()
+    rotated_p = events_p.copy()
     
     return rotated_xy, rotated_t, rotated_p
 
@@ -106,7 +105,8 @@ def rotate_events_270deg(
     """
     Rotate events 270 degrees clockwise (90 degrees counter-clockwise) around image center.
     
-    Uses integer arithmetic for exact transformation.
+    For non-square resolutions, coordinates are clipped to fit within the original
+    resolution bounds, maintaining the encoder's expected dimensions.
     
     Args:
         events_xy: Event coordinates [N, 2] with columns [x, y]
@@ -117,7 +117,6 @@ def rotate_events_270deg(
     
     Returns:
         Tuple of (rotated_xy, timestamps, polarities)
-        Out-of-bounds events are filtered out.
     """
     if len(events_xy) == 0:
         return events_xy.copy(), events_t.copy(), events_p.copy()
@@ -129,12 +128,13 @@ def rotate_events_270deg(
     new_x = height - 1 - y
     new_y = x
     
-    # Filter out-of-bounds events
-    valid_mask = (new_x >= 0) & (new_x < width) & (new_y >= 0) & (new_y < height)
+    # Clip coordinates to fit within the ORIGINAL resolution (width × height)
+    new_x =np.clip(new_x, 0, width - 1)
+    new_y = np.clip(new_y, 0, height - 1)
     
-    rotated_xy = np.stack([new_x[valid_mask], new_y[valid_mask]], axis=1).astype(events_xy.dtype)
-    rotated_t = events_t[valid_mask]
-    rotated_p = events_p[valid_mask]
+    rotated_xy = np.stack([new_x, new_y], axis=1).astype(events_xy.dtype)
+    rotated_t = events_t.copy()
+    rotated_p = events_p.copy()
     
     return rotated_xy, rotated_t, rotated_p
 
@@ -150,7 +150,11 @@ def rotate_events(
     """
     Rotate events by specified angle around image center.
     
-    Currently supports cardinal rotations: 0°, 90°, 180°, 270°.
+    Supports cardinal rotations: 0°, 90°, 180°, 270°.
+    
+    For non-square resolutions, rotated events are clipped to fit within the original
+    resolution bounds (width × height). This maintains the VecKM encoder's expected
+    resolution while allowing all rotation angles.
     
     Args:
         events_xy: Event coordinates [N, 2] with columns [x, y]
