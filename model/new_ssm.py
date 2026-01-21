@@ -193,6 +193,10 @@ if __name__ == "__main__":
     num_segments = 10
     events_per_segment = 50
     
+    # Detect device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"\nUsing device: {device}")
+    
     # Create model
     model = SpaceTimePolarSSM(
         encoding_dim=encoding_dim,
@@ -200,6 +204,7 @@ if __name__ == "__main__":
         resolution=resolution,
         num_classes=num_classes
     )
+    model = model.to(device)
     model.eval()
     
     print(f"\nModel Configuration:")
@@ -238,6 +243,10 @@ if __name__ == "__main__":
     print(f"  Complex features: {segments_complex.shape} (dtype: {segments_complex.dtype})")
     print(f"  Coordinates: {segments_coords.shape}")
     print(f"  Coordinate ranges: x=[{x_coords.min():.1f}, {x_coords.max():.1f}], y=[{y_coords.min():.1f}, {y_coords.max():.1f}]")
+    
+    # Move inputs to device
+    segments_complex = segments_complex.to(device)
+    segments_coords = segments_coords.to(device)
     
     # Forward pass
     print("\nRunning forward pass...")
