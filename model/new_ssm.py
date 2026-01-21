@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from mamba_ssm import Mamba2
+from typing import List, Dict
+from timm.layers import DropPath
 
 class ComplexPolarInput(nn.Module):
     """
@@ -44,34 +46,35 @@ class LocalHilbertAggregator(nn.Module):
     Processes scattered events within a segment using a shared Mamba 
     scanning in spatial orders (XY, YX).
     """
-    def __init__(self, dim, resolution):
+    def __init__(self, dim, resolution, dropout=0.1, drop_path_rate=0.0):
         super().__init__()
         self.width, self.height = resolution
         # Shared SSM for spatial scanning
         self.spatial_ssm = Mamba2(d_model=dim, d_state=16, d_conv=4, expand=2)
         self.norm = nn.LayerNorm(dim)
+        self.dropout = nn.Dropout(dropout)
+        self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
         
     def forward(self, x, coords):
         # x: [Batch, N_events, Dim]
         # coords: [Batch, N_events, 2] (x, y)
         
-        # 1. Generate Sort Indices for XY and YX orders
-        # (Simplified: In practice, use your lexsort logic here)
-        # We process the sequence twice (forward XY, and maybe sort by Y)
-        # For efficiency in this snippet, we just assume input is sorted by time
-        # and we let Mamba handle it, OR we explicitly sort indices here.
+        residual_input = x
         
+        # 1. Generate Sort Indices for XY and YX orders
         # First scan: Y-major order (y * W + x)
         sort_idx_yx = torch.argsort(coords[..., 1] * self.width + coords[..., 0], dim=1)
         x_sorted_yx = torch.gather(x, 1, sort_idx_yx.unsqueeze(-1).expand_as(x))
         
         # 2. Spatial Scan in YX order
         out_yx = self.spatial_ssm(x_sorted_yx)
+        out_yx = self.dropout(out_yx)
         
-        # Second scan: X-major order (x * W + y) for bidirectional processing
+        # Second scan: X-major order (x * H + y) for bidirectional processing
         sort_idx_xy = torch.argsort(coords[..., 0] * self.height + coords[..., 1], dim=1)
         x_sorted_xy = torch.gather(x, 1, sort_idx_xy.unsqueeze(-1).expand_as(x))
         out_xy = self.spatial_ssm(x_sorted_xy)
+        out_xy = self.dropout(out_xy)
         
         # Unsort both outputs back to original order
         inverse_idx_yx = torch.argsort(sort_idx_yx, dim=1)
@@ -80,8 +83,11 @@ class LocalHilbertAggregator(nn.Module):
         inverse_idx_xy = torch.argsort(sort_idx_xy, dim=1)
         out_xy_unsorted = torch.gather(out_xy, 1, inverse_idx_xy.unsqueeze(-1).expand_as(out_xy))
         
-        # Combine both directional scans
+        # Combine both directional scans with residual
         out = (out_yx_unsorted + out_xy_unsorted) / 2
+        
+        # Apply DropPath for regularization
+        out = self.drop_path(out)
         
         # 3. Multi-scale Pooling (Condense N events -> 1 Segment Vector)
         # Combine mean and max pooling for richer feature representation
@@ -117,20 +123,28 @@ class SymmetricPolarGating(nn.Module):
 
 class SpaceTimePolarSSM(nn.Module):
     """
-    The Main Model.
+    The Main Model with support for variable-length sequences.
     """
-    def __init__(self, encoding_dim=64, hidden_dim=128, resolution=(346, 260), num_classes=11):
+    def __init__(self, encoding_dim=64, hidden_dim=128, resolution=(346, 260), 
+                 num_classes=11, dropout=0.1, drop_path=0.0):
         super().__init__()
         self.width, self.height = resolution
+        self.encoding_dim = encoding_dim
+        self.hidden_dim = hidden_dim
+        self.num_classes = num_classes
+        
         self.input_adapter = ComplexPolarInput(encoding_dim, hidden_dim)
         
         # Two independent Local Aggregators (One for Mag, One for Phase)
-        self.local_ssm_mag = LocalHilbertAggregator(hidden_dim, resolution)
-        self.local_ssm_phase = LocalHilbertAggregator(hidden_dim, resolution)
+        self.local_ssm_mag = LocalHilbertAggregator(hidden_dim, resolution, dropout, drop_path)
+        self.local_ssm_phase = LocalHilbertAggregator(hidden_dim, resolution, dropout, drop_path)
         
-        # Global Time Mamba (One for each stream)
+        # Global Time Mamba (One for each stream) with dropout and drop_path
         self.global_ssm_mag = Mamba2(d_model=hidden_dim, d_state=64, expand=2)
         self.global_ssm_phase = Mamba2(d_model=hidden_dim, d_state=64, expand=2)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.drop_path_global = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         
         # Fusion
         self.fusion = SymmetricPolarGating(hidden_dim)
@@ -138,14 +152,26 @@ class SpaceTimePolarSSM(nn.Module):
         # Classifier
         self.classifier = nn.Linear(hidden_dim, num_classes)
 
-    def forward(self, segments_complex, segments_coords):
-        # Input is a list/tensor of segments: [Batch, T_segs, N_events, D]
-        # segments_coords: [Batch, T_segs, N_events, 2] with unnormalized (x, y) in pixel coordinates
-        B, T, N, D = segments_complex.shape
+    def extract_features(self, segments_complex, segments_coords):
+        """
+        Process a single sample with variable-length segments.
         
-        # Flatten Batch and Time to process all segments in parallel
-        z_flat = segments_complex.view(B*T, N, D)
-        coords_flat = segments_coords.view(B*T, N, 2)
+        Args:
+            segments_complex: [T_segs, N_events, D] complex tensor
+            segments_coords: [T_segs, N_events, 2] coordinates
+        
+        Returns:
+            [hidden_dim] pooled feature vector
+        """
+        T, N, D = segments_complex.shape
+        
+        # Add batch dimension for processing: [1, T, N, D]
+        z_batch = segments_complex.unsqueeze(0)
+        coords_batch = segments_coords.unsqueeze(0)
+        
+        # Flatten to process segments: [T, N, D]
+        z_flat = z_batch.view(T, N, D)
+        coords_flat = coords_batch.view(T, N, 2)
         
         # Normalize coordinates to [0, 1] range
         x_norm = coords_flat[..., 0:1] / self.width
@@ -155,54 +181,122 @@ class SpaceTimePolarSSM(nn.Module):
         f_mag, f_phase = self.input_adapter(z_flat, x_norm, y_norm)
         
         # 2. Local Aggregation (Spatial)
-        # Returns [B*T, Hidden]
+        # Returns [T, Hidden]
         seg_mag = self.local_ssm_mag(f_mag, coords_flat)
         seg_phase = self.local_ssm_phase(f_phase, coords_flat)
         
-        # Reshape back to Sequence: [B, T, Hidden]
-        seq_mag = seg_mag.view(B, T, -1)
-        seq_phase = seg_phase.view(B, T, -1)
+        # Add batch dimension for global SSM: [1, T, Hidden]
+        seq_mag = seg_mag.unsqueeze(0)
+        seq_phase = seg_phase.unsqueeze(0)
         
         # 3. Global Aggregation (Temporal)
         # Mamba scans across time T
         global_mag = self.global_ssm_mag(seq_mag)
+        global_mag = self.dropout(global_mag)
+        global_mag = self.drop_path_global(global_mag)
+        
         global_phase = self.global_ssm_phase(seq_phase)
+        global_phase = self.dropout(global_phase)
+        global_phase = self.drop_path_global(global_phase)
         
         # 4. Symmetric Gating
         fused_features = self.fusion(global_mag, global_phase)
         
-        # 5. Classify (Pool over time or take last state)
-        final_out = fused_features.mean(dim=1) 
-        return self.classifier(final_out)
+        # 5. Pool over time: [1, T, Hidden] -> [Hidden]
+        pooled = fused_features.squeeze(0).mean(dim=0)
+        
+        return pooled
+    
+    def forward(self, batch):
+        """
+        Process a batch of variable-length samples in UNIFIED FORMAT.
+        
+        Args:
+            batch: Dictionary with UNIFIED FORMAT:
+                - 'segments_complex': List[List[Tensor]] - batch of segment lists
+                - 'segments_coords': List[List[Tensor]] - batch of coord lists
+        
+        Returns:
+            logits: [batch_size, num_classes]
+        """
+        segments_complex_list = batch['segments_complex']
+        segments_coords_list = batch['segments_coords']
+        
+        features_list = []
+        for i, (segs_list, coords_list) in enumerate(zip(segments_complex_list, segments_coords_list)):
+            # Stack segments into proper tensor format
+            # segs_list is List[Tensor] where each tensor is [N_i, D]
+            # Need to create [T_segments, N_max, D] with padding
+            
+            if len(segs_list) > 0:
+                # Find max events per segment
+                max_events = max(seg.shape[0] for seg in segs_list)
+                T_segments = len(segs_list)
+                D = segs_list[0].shape[-1]
+                
+                # Create padded tensors
+                segments_complex_padded = torch.zeros(T_segments, max_events, D, 
+                                                     dtype=segs_list[0].dtype, 
+                                                     device=segs_list[0].device)
+                segments_coords_padded = torch.zeros(T_segments, max_events, 2,
+                                                     dtype=coords_list[0].dtype,
+                                                     device=coords_list[0].device)
+                
+                # Fill in the actual data
+                for t, (seg, coord) in enumerate(zip(segs_list, coords_list)):
+                    n_events = seg.shape[0]
+                    segments_complex_padded[t, :n_events] = seg
+                    segments_coords_padded[t, :n_events] = coord
+            else:
+                # Empty sample
+                segments_complex_padded = torch.zeros(1, 1, self.encoding_dim, dtype=torch.cfloat)
+                segments_coords_padded = torch.zeros(1, 1, 2, dtype=torch.float32)
+            
+            # Extract features for this sample
+            feat = self.extract_features(segments_complex_padded, segments_coords_padded)
+            features_list.append(feat)
+            
+            # Clear GPU cache between samples to prevent OOM
+            if torch.cuda.is_available() and i % 4 == 3:
+                torch.cuda.empty_cache()
+        
+        # Stack features: [batch_size, hidden_dim]
+        features = torch.stack(features_list)
+        
+        # Classify
+        logits = self.classifier(features)
+        return logits
 
 
 if __name__ == "__main__":
     """
-    Test the SpaceTimePolarSSM model with random complex encodings in XYT space.
+    Test the SpaceTimePolarSSM model with variable-length sequences.
     """
-    print("=" * 60)
-    print("Testing SpaceTimePolarSSM Model")
-    print("=" * 60)
+    print("=" * 70)
+    print("Testing SpaceTimePolarSSM Model with Variable-Length Support")
+    print("=" * 70)
     
     # Model configuration
     encoding_dim = 64
     hidden_dim = 128
     resolution = (346, 260)  # DVS camera resolution (width, height)
     num_classes = 11
-    batch_size = 2
-    num_segments = 10
-    events_per_segment = 50
+    batch_size = 3
+    dropout = 0.1
+    drop_path = 0.1
     
     # Detect device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"\nUsing device: {device}")
     
-    # Create model
+    # Create model with dropout and drop_path
     model = SpaceTimePolarSSM(
         encoding_dim=encoding_dim,
         hidden_dim=hidden_dim,
         resolution=resolution,
-        num_classes=num_classes
+        num_classes=num_classes,
+        dropout=dropout,
+        drop_path=drop_path
     )
     model = model.to(device)
     model.eval()
@@ -212,6 +306,8 @@ if __name__ == "__main__":
     print(f"  Hidden Dim: {hidden_dim}")
     print(f"  Resolution: {resolution[0]}x{resolution[1]}")
     print(f"  Num Classes: {num_classes}")
+    print(f"  Dropout: {dropout}")
+    print(f"  Drop Path: {drop_path}")
     
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
@@ -220,39 +316,51 @@ if __name__ == "__main__":
     print(f"  Total: {total_params:,}")
     print(f"  Trainable: {trainable_params:,}")
     
-    # Generate random complex encodings in XYT space
-    print(f"\nGenerating random test data:")
+    # ========================================================================
+    # Test: Variable-length batch
+    # ========================================================================
+    print("\n" + "=" * 70)
+    print("Variable-Length Batch Test")
+    print("=" * 70)
+    
+    print(f"\nGenerating variable-length test data:")
     print(f"  Batch size: {batch_size}")
-    print(f"  Segments per sample: {num_segments}")
-    print(f"  Events per segment: {events_per_segment}")
     
-    # Complex features: [Batch, T_segments, N_events, encoding_dim]
-    # Simulate complex embeddings with magnitude and phase
-    magnitude = torch.rand(batch_size, num_segments, events_per_segment, encoding_dim) * 2
-    phase = torch.rand(batch_size, num_segments, events_per_segment, encoding_dim) * 2 * 3.14159
-    segments_complex = magnitude * torch.exp(1j * phase)
-    segments_complex = segments_complex.to(torch.complex64)
+    # Create variable-length samples (different number of segments per sample)
+    variable_segments = [8, 12, 10]  # Different lengths for each sample
+    events_per_segment = 50
     
-    # Coordinates: [Batch, T_segments, N_events, 2] - (x, y) in pixel space
-    # Generate random coordinates within resolution
-    x_coords = torch.randint(0, resolution[0], (batch_size, num_segments, events_per_segment, 1)).float()
-    y_coords = torch.randint(0, resolution[1], (batch_size, num_segments, events_per_segment, 1)).float()
-    segments_coords = torch.cat([x_coords, y_coords], dim=-1)
+    segments_complex_list = []
+    segments_coords_list = []
     
-    print(f"\nInput Shapes:")
-    print(f"  Complex features: {segments_complex.shape} (dtype: {segments_complex.dtype})")
-    print(f"  Coordinates: {segments_coords.shape}")
-    print(f"  Coordinate ranges: x=[{x_coords.min():.1f}, {x_coords.max():.1f}], y=[{y_coords.min():.1f}, {y_coords.max():.1f}]")
+    for i, num_segs in enumerate(variable_segments):
+        # Create complex features for this sample
+        mag = torch.rand(num_segs, events_per_segment, encoding_dim) * 2
+        ph = torch.rand(num_segs, events_per_segment, encoding_dim) * 2 * 3.14159
+        seg_complex = mag * torch.exp(1j * ph)
+        seg_complex = seg_complex.to(torch.complex64).to(device)
+        
+        # Create coordinates for this sample
+        x_c = torch.randint(0, resolution[0], (num_segs, events_per_segment, 1)).float().to(device)
+        y_c = torch.randint(0, resolution[1], (num_segs, events_per_segment, 1)).float().to(device)
+        seg_coords = torch.cat([x_c, y_c], dim=-1)
+        
+        segments_complex_list.append(seg_complex)
+        segments_coords_list.append(seg_coords)
+        
+        print(f"  Sample {i}: {num_segs} segments x {events_per_segment} events = {num_segs * events_per_segment} total events")
     
-    # Move inputs to device
-    segments_complex = segments_complex.to(device)
-    segments_coords = segments_coords.to(device)
+    # Create batch dictionary
+    batch_dict = {
+        'segments_complex': segments_complex_list,
+        'segments_coords': segments_coords_list
+    }
     
     # Forward pass
     print("\nRunning forward pass...")
     try:
         with torch.no_grad():
-            logits = model(segments_complex, segments_coords)
+            logits = model(batch_dict)
         
         print(f"✓ Forward pass successful!")
         print(f"\nOutput:")
@@ -265,15 +373,15 @@ if __name__ == "__main__":
         
         print(f"\nPredictions:")
         for i in range(batch_size):
-            print(f"  Sample {i}: Class {predicted_classes[i].item()} (confidence: {probs[i, predicted_classes[i]].item():.3f})")
+            print(f"  Sample {i} ({variable_segments[i]} segs): Class {predicted_classes[i].item()} (confidence: {probs[i, predicted_classes[i]].item():.3f})")
         
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 70)
         print("✓ All tests passed!")
-        print("=" * 60)
+        print("=" * 70)
         
     except Exception as e:
         print(f"\n✗ Forward pass failed with error:")
         print(f"  {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
-        print("=" * 60)
+        print("=" * 70)

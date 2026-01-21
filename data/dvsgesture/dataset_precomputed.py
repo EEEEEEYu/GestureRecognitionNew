@@ -90,7 +90,6 @@ class DVSGesturePrecomputed(data.Dataset):
         aug_time_scale_max: float = 1.0,
         height: int = 128,
         width: int = 128,
-        use_position_encoding: bool = False,
     ):
         """
         DVS Gesture Precomputed Dataset Loader.
@@ -112,7 +111,7 @@ class DVSGesturePrecomputed(data.Dataset):
         self.purpose = purpose
         self.ratio_of_vectors = ratio_of_vectors
         self.use_flip_augmentation = use_flip_augmentation
-        self.use_position_encoding = use_position_encoding
+
         
         # Initialize augmenter for training
         self.augmentor = None
@@ -168,15 +167,15 @@ class DVSGesturePrecomputed(data.Dataset):
     
     def __getitem__(self, idx: int) -> dict:
         """
-        Load and return a precomputed sample.
+        Load and return a precomputed sample in unified format.
         
         Returns:
             Dictionary containing:
-                - 'vectors': Complex tensor of shape [total_vectors, encoding_dim]
-                - 'event_coords': Event coordinates array [total_vectors, 4] with columns [x, y, t, p]
-                - 'num_vectors_per_interval': List of vector counts per interval
+                - 'segments_complex': List[Tensor] of [N_i, encoding_dim] for each segment
+                - 'segments_coords': List[Tensor] of [N_i, 2] with [x, y] coords
                 - 'label': Class label
-                - 'file_path': Original file path
+                - 'num_segments': Number of segments
+                - 'num_vectors_per_segment': List of vector counts
         """
         with h5py.File(self.h5_path, 'r') as h5f:
             sample_group = h5f[f'sample_{idx:06d}']
@@ -185,7 +184,6 @@ class DVSGesturePrecomputed(data.Dataset):
             # Load all intervals
             all_vectors = []
             all_event_coords = []
-            num_vectors_per_interval = []
             
             for interval_idx in range(num_intervals):
                 interval_group = sample_group[f'interval_{interval_idx:03d}']
@@ -194,7 +192,7 @@ class DVSGesturePrecomputed(data.Dataset):
                 real_part = torch.from_numpy(interval_group['real'][:])
                 imag_part = torch.from_numpy(interval_group['imag'][:])
                 
-                # Load event coordinates [num_vectors, 4] with columns [x, y, t, p]
+                # Load event coordinates [num_vectors, 5] with columns [x, y, t, p, segment_id]
                 event_coords = interval_group['event_coords'][:]
                 
                 # Reconstruct complex tensor
@@ -215,58 +213,70 @@ class DVSGesturePrecomputed(data.Dataset):
                 
                 all_vectors.append(vectors)
                 all_event_coords.append(event_coords)
-                num_vectors_per_interval.append(len(vectors))
             
-                # Concatenate all intervals into single tensors
-            if len(all_vectors) > 0 and sum(num_vectors_per_interval) > 0:
+            # Concatenate all intervals into single tensors
+            if len(all_vectors) > 0 and sum([len(v) for v in all_vectors]) > 0:
                 vectors_concatenated = torch.cat(all_vectors, dim=0)
                 event_coords_concatenated = np.concatenate(all_event_coords, axis=0)
                 
                 # Apply Robust Augmentations (Jitter, Drop, TimeScale)
-                # This modifies event coordinates and potentially drops vectors
                 if self.augmentor is not None:
                     vectors_concatenated, event_coords_concatenated = self.augmentor(
                         vectors_concatenated, event_coords_concatenated
                     )
-                    
             else:
                 # Handle empty case
                 vectors_concatenated = torch.zeros(0, self.encoding_dim, dtype=torch.cfloat)
-                event_coords_concatenated = np.zeros((0, 4), dtype=np.float32)
+                event_coords_concatenated = np.zeros((0, 5), dtype=np.float32)
         
         # Get label
         label = self.labels[idx]
-        file_path = self.file_paths[idx]
         
-        # Apply position encoding if enabled
-        if self.use_position_encoding and len(vectors_concatenated) > 0:
-            # Normalize coordinates to [0, 1]
-            coords_tensor = torch.from_numpy(event_coords_concatenated).float()
-            x_norm = coords_tensor[:, 0] / self.width  # x at index 0
-            y_norm = coords_tensor[:, 1] / self.height  # y at index 1
+        # ========================================================================
+        # RESTRUCTURE BY SEGMENTS using segment_id column
+        # ========================================================================
+        if len(vectors_concatenated) > 0:
+            # Extract segment IDs from column 4
+            segment_ids = event_coords_concatenated[:, 4].astype(int)
+            unique_segments = np.unique(segment_ids)
             
-            # Normalize time relative to the interval
-            t_coords = coords_tensor[:, 2]  # t at index 2
-            t_min = t_coords.min()
-            t_max = t_coords.max()
-            t_range = t_max - t_min
-            t_norm = (t_coords - t_min) / (t_range + 1e-6) if t_range > 0 else torch.zeros_like(t_coords)
+            segments_complex = []
+            segments_coords = []
+            num_vectors_per_segment = []
             
-            # Convert complex vectors to real: [real, imag]
-            vectors_real = torch.view_as_real(vectors_concatenated).reshape(vectors_concatenated.shape[0], -1)
+            for seg_id in sorted(unique_segments):
+                # Get mask for this segment
+                mask = segment_ids == seg_id
+                
+                # Extract vectors for this segment
+                seg_vectors = vectors_concatenated[mask]
+                seg_coords = event_coords_concatenated[mask, :2]  # Just x, y
+                
+
+                
+                # Convert coords to tensor and normalize
+                seg_coords_tensor = torch.from_numpy(seg_coords).float()
+                seg_coords_tensor[:, 0] /= self.width  # Normalize x
+                seg_coords_tensor[:, 1] /= self.height  # Normalize y
+                
+                segments_complex.append(seg_vectors)
+                segments_coords.append(seg_coords_tensor)
+                num_vectors_per_segment.append(len(seg_vectors))
             
-            # Concatenate: [real_part (encoding_dim), imag_part (encoding_dim), x_norm, y_norm, t_norm]
-            # Shape: (N, encoding_dim*2 + 3)
-            position_features = torch.stack([x_norm, y_norm, t_norm], dim=1)  # (N, 3)
-            vectors_concatenated = torch.cat([vectors_real, position_features], dim=1)  # (N, encoding_dim*2+3)
+            num_segments = len(segments_complex)
+        else:
+            # Empty sample
+            segments_complex = []
+            segments_coords = []
+            num_vectors_per_segment = []
+            num_segments = 0
         
         return {
-            'vectors': vectors_concatenated,
-            'event_coords': event_coords_concatenated,  # [total_vectors, 4] with [x, y, t, p]
-            'num_vectors_per_interval': num_vectors_per_interval,
+            'segments_complex': segments_complex,  # List[Tensor] of [N_i, D]
+            'segments_coords': segments_coords,     # List[Tensor] of [N_i, 2]
             'label': label,
-            'file_path': file_path,
-            'num_intervals': num_intervals,
+            'num_segments': num_segments,
+            'num_vectors_per_segment': num_vectors_per_segment,
         }
     
     def get_sample_info(self, idx: int) -> dict:
@@ -288,48 +298,23 @@ class DVSGesturePrecomputed(data.Dataset):
 
 def collate_fn(batch: List[dict]) -> dict:
     """
-    Custom collate function for batching precomputed samples.
-    
-    Since different samples may have different numbers of vectors,
-    we need to handle variable-length sequences.
+    Custom collate function for batching precomputed samples in unified format.
     
     Args:
         batch: List of samples from __getitem__
     
     Returns:
-        Batched dictionary with vectors and event coordinates
+        Batched dictionary with segments and labels
     """
     # Extract components
-    vectors_list = [sample['vectors'] for sample in batch]
-    event_coords_list = [sample['event_coords'] for sample in batch]
+    segments_complex_list = [sample['segments_complex'] for sample in batch]
+    segments_coords_list = [sample['segments_coords'] for sample in batch]
     labels = torch.tensor([sample['label'] for sample in batch], dtype=torch.long)
-    num_vectors_per_sample = [sample['vectors'].shape[0] for sample in batch]
-    
-    # Option 1: Return as list (for variable-length processing)
-    # This is useful if your model can handle variable-length inputs
-    
-    # Option 2: Pad to common length (uncomment if needed)
-    # max_vectors = max(num_vectors_per_sample)
-    # encoding_dim = vectors_list[0].shape[1] if len(vectors_list[0]) > 0 else 64
-    # 
-    # padded_vectors = torch.zeros(len(batch), max_vectors, encoding_dim, dtype=torch.cfloat)
-    # padded_coords = torch.zeros(len(batch), max_vectors, 4, dtype=torch.float32)
-    # mask = torch.zeros(len(batch), max_vectors, dtype=torch.bool)
-    # 
-    # for i, (vectors, coords) in enumerate(zip(vectors_list, event_coords_list)):
-    #     if len(vectors) > 0:
-    #         padded_vectors[i, :len(vectors)] = vectors
-    #         padded_coords[i, :len(vectors)] = torch.from_numpy(coords)
-    #         mask[i, :len(vectors)] = True
     
     return {
-        'vectors': vectors_list,  # List of tensors with different lengths
-        'event_coords': event_coords_list,  # List of arrays [num_vectors, 4] with [x, y, t, p]
+        'segments_complex': segments_complex_list,  # List[List[Tensor]] - batch of segment lists
+        'segments_coords': segments_coords_list,     # List[List[Tensor]] - batch of coord lists
         'labels': labels,  # [batch_size]
-        'num_vectors_per_sample': num_vectors_per_sample,  # List of ints
-        'num_vectors_per_interval': [sample['num_vectors_per_interval'] for sample in batch],
-        'file_paths': [sample['file_path'] for sample in batch],
-        'num_intervals': [sample['num_intervals'] for sample in batch],
     }
 
 

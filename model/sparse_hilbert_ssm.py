@@ -445,9 +445,9 @@ class SparseHilbertSSM(nn.Module):
         Process a batch of variable-length samples with optional Manifold Mixup.
         
         Args:
-            batch: Dictionary with:
-                - vectors: List[Tensor] of shape [length_i, encoding_dim]
-                - event_coords: List[ndarray] of shape [length_i, 4]
+            batch: Dictionary with UNIFIED FORMAT:
+                - segments_complex: List[List[Tensor]] - batch of segment lists
+                - segments_coords: List[List[Tensor]] - batch of coord lists
             mixup_alpha (float): Alpha parameter for Beta distribution. If > 0, apply mixup.
         
         Returns:
@@ -456,12 +456,35 @@ class SparseHilbertSSM(nn.Module):
             Else:
                 logits: [batch_size, num_classes]
         """
-        vectors_list = batch['vectors']
-        coords_list = batch['event_coords']
+        segments_complex_list = batch['segments_complex']
+        segments_coords_list = batch['segments_coords']
         
         features_list = []
         
-        for i, (vectors, coords) in enumerate(zip(vectors_list, coords_list)):
+        for i, (segments, coords_list) in enumerate(zip(segments_complex_list, segments_coords_list)):
+            # Concatenate all segments for this sample
+            if len(segments) > 0:
+                vectors = torch.cat(segments, dim=0)  # Concatenate all segments
+                
+                # Concatenate coordinates and convert to numpy
+                coords_tensors = coords_list
+                if len(coords_tensors) > 0:
+                    coords = torch.cat(coords_tensors, dim=0).cpu().numpy()
+                    
+                    # Add polarity column (required by extract_features)
+                    # sparse_hilbert expects [x, y, t, p] format
+                    # We have [x, y] normalized, need to add t and p
+                    # For now, use zeros for t and p since we don't need them for sorting
+                    t_col = np.zeros((len(coords), 1), dtype=np.float32)
+                    p_col = np.zeros((len(coords), 1), dtype=np.float32)
+                    coords = np.concatenate([coords, t_col, p_col], axis=1)
+                else:
+                    coords = np.zeros((0, 4), dtype=np.float32)
+            else:
+                # Empty sample
+                vectors = torch.zeros(0, self.encoding_dim, dtype=torch.cfloat)
+                coords = np.zeros((0, 4), dtype=np.float32)
+            
             # Extract features for each sample
             feat = self.extract_features(vectors, coords)
             features_list.append(feat)

@@ -5,8 +5,6 @@ TRAINING:
   seed: 42
   max_epochs: 100 # Increased from 50
   label_smoothing: 0.05 # Soft targets to prevent overconfidence
-  mixup_alpha: 0.0 # Reduced from 1.0. Manifold Mixup strength (alpha=1.0 is uniform [0,1])
-  precision: "32-true"  # Full float32 precision
 
 DISTRIBUTED:
   accelerator: gpu  # Changed from cpu - Mamba2 requires CUDA
@@ -16,27 +14,17 @@ DISTRIBUTED:
 
 DATA:
   dataset:
-    file_name: DVSGesturePrecomputed  # Changed from cifar10
-    class_name: DVSGesturePrecomputed
+    file_name: HMDB_DVS.dataset  # Module path relative to data/
+    class_name: HMDB_DVS
     dataset_init_args:
-      # DVSGesture-specific parameters
-      precomputed_dir: /fs/nexus-projects/DVS_Actions/HMDB_DVS/HMDB_precomputed_data
+      # HMDB-DVS parameters
+      dataset_dir: /fs/nexus-projects/DVS_Actions/HMDB_DVS
       height: 180
       width: 240
-      num_classes: 11  # DVSGesture has 11 classes
-      # Second-stage downsampling (training-time augmentation)
-      train_ratio_of_vectors: 0.9  # Use 50% of the 30% precomputed vectors = 15% total (Changed from 0.8)
-      val_ratio_of_vectors: 1.0    # Use 100% of precomputed vectors during validation
-      use_flip_augmentation: False # Disabled as per request
-      # Spatiotemporal Position Encoding
-      # When enabled, adds normalized (x, y, t) coordinates to vector features
-      # Input changes from complex64 (encoding_dim) to float32 (encoding_dim*2 + 3)
-      use_position_encoding: False
-      # Robustness Augmentations
-      aug_jitter_std: 0.5       # Coordinate Jitter (pixels/time). Moderate strength.
-      aug_drop_rate: 0.1        # Event Drop Rate (10%). Moderate strength.
-      aug_time_scale_min: 0.8   # Temporal Scaling Min (20% faster).
-      aug_time_scale_max: 1.2   # Temporal Scaling Max (20% slower).
+      num_classes: 51  # HMDB-DVS has 51 classes
+      use_flip_augmentation: False  # Random flip augmentation
+      accumulation_interval_ms: 200.0  # Time interval for event accumulation
+      train_split: 0.8  # 80% train, 20% validation
 
   dataloader:
     batch_size: 8  # Reduced for memory efficiency with Mamba2
@@ -57,13 +45,10 @@ MODEL:
     # DVSGesture input parameters
     encoding_dim: 64  # From SparseVKMEncoder output
     num_classes: ${DATA.dataset.dataset_init_args.num_classes}
-    # Position encoding flag (interpolated from DATA to ensure consistency)
-    use_position_encoding: ${DATA.dataset.dataset_init_args.use_position_encoding}
-    input_meta:
-      height: ${DATA.dataset.dataset_init_args.height}
-      width: ${DATA.dataset.dataset_init_args.width}
-      encoding_dim: ${MODEL.model_init_args.encoding_dim}  # Complex vector dimension
-      num_classes: ${DATA.dataset.dataset_init_args.num_classes}
+    # Pass resolution as list [width, height] which OmegaConf handles
+    resolution:
+      - ${DATA.dataset.dataset_init_args.width}
+      - ${DATA.dataset.dataset_init_args.height}
     # 3D SSM Architecture parameters
     hidden_dim: 256
     num_layers: 6  # Increased from 4 (deeper model enabled by weight sharing)
@@ -157,7 +142,13 @@ PRECOMPUTING:
   # Determines how to select which events become query vectors for VecKM encoding
   # Applied AFTER denoising
   sampling:
-    method: random  # Options: 'random', 'grid_decimation' (recommended)
+    method: adaptive_striding  # Options: 'random', 'grid_decimation', 'adaptive_striding' (recommended)
+    
+    # Kernel-Aware Adaptive Striding
+    # Selects queries to cover the spatial domain with kernel_size and specified overlap.
+    adaptive_striding:
+      kernel_size: ${PRECOMPUTING.kernel_size}  # Match encoder kernel size
+      overlap_factor: 0.2  # 0.0=Tiling, 0.5=Half-Overlap. Controls density.
     
     # Grid decimation parameters (used when method=grid_decimation)
     # This method uses stratified sampling with retention_ratio from ratio_of_vectors above

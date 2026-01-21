@@ -72,6 +72,7 @@ class DVSGesturePreprocessor:
         sampling_cfg = OmegaConf.select(precompute_cfg, 'sampling', default={})
         self.sampling_method = OmegaConf.select(sampling_cfg, 'method', default='random')
         self.sampling_grid_decimation_cfg = OmegaConf.select(sampling_cfg, 'grid_decimation', default={'grid_size': 4})
+        self.adaptive_sampling_cfg = OmegaConf.select(sampling_cfg, 'adaptive_striding', default={'kernel_size': 17, 'overlap_factor': 0.0})
         
         # Create output directory
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
@@ -86,6 +87,10 @@ class DVSGesturePreprocessor:
         if self.sampling_method == 'grid_decimation':
             grid_size = self.sampling_grid_decimation_cfg.get('grid_size', 2)
             print(f"  Grid size: {grid_size}, Retention ratio: {self.ratio_of_vectors}")
+        elif self.sampling_method == 'adaptive_striding':
+            ks = self.adaptive_sampling_cfg.get('kernel_size', 17)
+            ov = self.adaptive_sampling_cfg.get('overlap_factor', 0.0)
+            print(f"  Kernel Size: {ks}, Overlap Factor: {ov} (Stride: {int(ks * (1-ov))})")
         elif self.sampling_method == 'random':
             print(f"  Retention ratio: {self.ratio_of_vectors}")
         
@@ -124,29 +129,31 @@ class DVSGesturePreprocessor:
         events_xy: np.ndarray,
         events_t: np.ndarray,
         events_p: np.ndarray,
+        segment_id: int,
     ) -> Tuple[torch.Tensor, np.ndarray]:
         """
         Encode events for a single time interval using the pipeline:
         1. Denoise (optional, pure numpy)
-        2. Sample (pure numpy)
+        2. Sample (pure numpy) - Now using Kernel-Aware Adaptive Sampling
         3. VecKM Encode (torch)
         
         Args:
             events_xy: Event coordinates [N, 2]
             events_t: Event timestamps [N]
             events_p: Event polarities [N]
+            segment_id: Segment/interval index for this batch of events
         
         Returns:
             Tuple of:
                 - Complex tensor of shape [num_vectors, encoding_dim]
-                - Event coordinates array [num_vectors, 4] with columns [x, y, t, p]
+                - Event coordinates array [num_vectors, 5] with columns [x, y, t, p, segment_id]
         """
         num_events = len(events_t)
         
         if num_events == 0:
             # Return empty tensors for empty intervals
             empty_embeddings = torch.zeros(0, self.encoding_dim, dtype=torch.cfloat)
-            empty_coords = np.zeros((0, 4), dtype=np.float32)
+            empty_coords = np.zeros((0, 5), dtype=np.float32)
             return empty_embeddings, empty_coords
         
         # Extract separate x, y coordinates
@@ -155,7 +162,6 @@ class DVSGesturePreprocessor:
         
         # ===================================================================
         # BOUNDS CHECKING: Clip coordinates to valid range
-        # Some event data may contain out-of-bounds events due to sensor noise
         # ===================================================================
         events_x = np.clip(events_x, 0, self.width - 1)
         events_y = np.clip(events_y, 0, self.height - 1)
@@ -177,7 +183,7 @@ class DVSGesturePreprocessor:
             if num_events_after_denoise == 0:
                 # All events were filtered out
                 empty_embeddings = torch.zeros(0, self.encoding_dim, dtype=torch.cfloat)
-                empty_coords = np.zeros((0, 4), dtype=np.float32)
+                empty_coords = np.zeros((0, 5), dtype=np.float32)
                 return empty_embeddings, empty_coords
         else:
             # No denoising, use original events
@@ -188,10 +194,29 @@ class DVSGesturePreprocessor:
             num_events_after_denoise = num_events
         
         # ===================================================================
-        # STAGE 2: SAMPLING (Pure Numpy)
+        # STAGE 2: SAMPLING (Kernel-Aware Adaptive)
         # ===================================================================
-        if self.sampling_method == 'random':
-            # Random sampling (pure numpy)
+        from utils.density_adaptive_spatial_striding import adaptive_spatial_sampling
+        
+        if self.sampling_method == 'adaptive_striding':
+            # NEW: Kernel-Aware Adaptive Striding
+            # Uses: Kernel Size and Overlap Factor
+            
+            kernel_size = self.adaptive_sampling_cfg.get('kernel_size', 17)
+            overlap_factor = self.adaptive_sampling_cfg.get('overlap_factor', 0.2)
+            
+            query_indices = adaptive_spatial_sampling(
+                events_t_clean, events_y_clean, events_x_clean, events_p_clean,
+                height=self.height, width=self.width,
+                kernel_size=kernel_size,
+                overlap_factor=overlap_factor,
+                sort_by_time=True  # Prefer newest events
+            )
+            
+            num_vectors = len(query_indices)
+            
+        elif self.sampling_method == 'random':
+            # FALLBACK: Random sampling (pure numpy)
             num_vectors = max(1, int(num_events_after_denoise * self.ratio_of_vectors))
             
             if num_vectors >= num_events_after_denoise:
@@ -201,41 +226,37 @@ class DVSGesturePreprocessor:
                 query_indices = np.sort(query_indices)  # Sort for temporal order
         
         elif self.sampling_method == 'grid_decimation':
-            # Grid decimation sampling (pure numpy) with retention ratio
-            grid_size = self.sampling_grid_decimation_cfg.get('grid_size', 2)
-            
-            from utils.denoising_and_sampling import sample_grid_decimation_fast
-            
-            # Get indices (pure numpy, no conversion)
-            query_indices = sample_grid_decimation_fast(
-                events_t_clean, events_y_clean, events_x_clean, events_p_clean,
-                self.height, self.width,
-                target_grid=grid_size,
-                retention_ratio=self.ratio_of_vectors,
-                return_indices=True
-            )
-            
-            num_vectors = len(query_indices)
-        
+             # LEGACY: Grid decimation
+             grid_size = self.sampling_grid_decimation_cfg.get('grid_size', 2)
+             from utils.denoising_and_sampling import sample_grid_decimation_fast
+             query_indices = sample_grid_decimation_fast(
+                 events_t_clean, events_y_clean, events_x_clean, events_p_clean,
+                 self.height, self.width,
+                 target_grid=grid_size,
+                 retention_ratio=self.ratio_of_vectors,
+                 return_indices=True
+             )
+             num_vectors = len(query_indices)
         else:
             raise ValueError(f"Unknown sampling method: {self.sampling_method}")
         
         # If no queries selected, return empty
         if len(query_indices) == 0:
             empty_embeddings = torch.zeros(0, self.encoding_dim, dtype=torch.cfloat)
-            empty_coords = np.zeros((0, 4), dtype=np.float32)
+            empty_coords = np.zeros((0, 5), dtype=np.float32)
             return empty_embeddings, empty_coords
         
         # ===================================================================
         # STAGE 3: VecKM ENCODING (Convert to Torch here)
         # ===================================================================
         # Extract event coordinates for the sampled vectors
-        # Format: [x, y, t, p]
-        event_coords = np.zeros((num_vectors, 4), dtype=np.float32)
+        # Format: [x, y, t, p, segment_id]
+        event_coords = np.zeros((num_vectors, 5), dtype=np.float32)
         event_coords[:, 0] = events_x_clean[query_indices]  # x
         event_coords[:, 1] = events_y_clean[query_indices]  # y
         event_coords[:, 2] = events_t_clean[query_indices]  # t
         event_coords[:, 3] = events_p_clean[query_indices]  # p
+        event_coords[:, 4] = segment_id  # segment_id
         
         # NOW convert to tensors for VecKM encoding (single conversion)
         # VecKM uses all denoised events as context, but only queries the sampled ones
@@ -291,6 +312,7 @@ class DVSGesturePreprocessor:
                 events_xy_sliced[i],
                 events_t_sliced[i],
                 events_p_sliced[i],
+                segment_id=i,  # Pass segment ID
             )
             encoded_intervals.append(encoded)
             event_coords_intervals.append(event_coords)
@@ -298,7 +320,7 @@ class DVSGesturePreprocessor:
         
         return {
             'encoded_intervals': encoded_intervals,  # List of tensors
-            'event_coords_intervals': event_coords_intervals,  # List of arrays [num_vectors, 4]
+            'event_coords_intervals': event_coords_intervals,  # List of arrays [num_vectors, 5]
             'num_vectors_per_interval': num_vectors_per_interval,  # List of ints
             'num_intervals': num_intervals,
             'label': sample['label'],
@@ -406,7 +428,7 @@ class DVSGesturePreprocessor:
                         interval_group.create_dataset('real', data=real_part, compression='gzip')
                         interval_group.create_dataset('imag', data=imag_part, compression='gzip')
                         
-                        # Store event coordinates [num_vectors, 4] with columns [x, y, t, p]
+                        # Store event coordinates [num_vectors, 5] with columns [x, y, t, p, segment_id]
                         interval_group.create_dataset('event_coords', data=event_coords, compression='gzip')
                     
                     # Store metadata arrays - resize and append
