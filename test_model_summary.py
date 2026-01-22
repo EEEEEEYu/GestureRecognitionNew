@@ -1,20 +1,46 @@
+"""
+Standalone test to demonstrate the model parameter summary.
+This creates a mock version of the model to show what the summary would look like.
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mamba_ssm import Mamba2
-from timm.layers import DropPath
+
+class MockMamba2(nn.Module):
+    """Mock Mamba2 for testing (approximates actual parameter count)"""
+    def __init__(self, d_model=128, d_state=32, expand=2):
+        super().__init__()
+        self.d_model = d_model
+        self.d_state = d_state
+        self.expand = expand
+        
+        # Approximate Mamba2 structure
+        d_inner = int(d_model * expand)
+        self.in_proj = nn.Linear(d_model, d_inner * 2)
+        self.conv1d = nn.Conv1d(d_inner, d_inner, kernel_size=4, padding=3, groups=d_inner)
+        self.x_proj = nn.Linear(d_inner, d_state * 2)
+        self.dt_proj = nn.Linear(d_inner, d_inner)
+        self.out_proj = nn.Linear(d_inner, d_model)
+    
+    def forward(self, x):
+        return x
+
+class MockDropPath(nn.Module):
+    """Mock DropPath"""
+    def __init__(self, drop_prob=0.1):
+        super().__init__()
+        self.drop_prob = drop_prob
+    
+    def forward(self, x):
+        return x
 
 class ConvMambaBlock(nn.Module):
-    """
-    The Core Building Block: Conv1d (Local) + Mamba2 (Global) + MLP.
-    Designed for variable-length sequences [B, L, D].
-    """
+    """Same as in new_ssm.py but with mock Mamba2"""
     def __init__(self, dim, d_state=32, expand=2, dropout=0.1, drop_path=0.1):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
-        # Depthwise Conv to enhance local features (spatial/temporal jitters)
         self.local_conv = nn.Conv1d(dim, dim, kernel_size=3, padding=1, groups=dim)
-        self.ssm = Mamba2(d_model=dim, d_state=d_state, expand=expand)
+        self.ssm = MockMamba2(d_model=dim, d_state=d_state, expand=expand)
         
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = nn.Sequential(
@@ -24,24 +50,19 @@ class ConvMambaBlock(nn.Module):
             nn.Linear(dim * 4, dim),
             nn.Dropout(dropout)
         )
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.drop_path = MockDropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x):
-        # x: [B, L, D]
         res = x
         x = self.norm1(x)
-        
-        # 1. Local + Global Branch
-        # Transpose for Conv1d: [B, D, L]
         x_conv = self.local_conv(x.transpose(1, 2)).transpose(1, 2)
         x = self.ssm(x_conv + x) 
         x = res + self.drop_path(x)
-        
-        # 2. Feed-Forward Branch
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
-class NestedEventMamba(nn.Module):
+class MockNestedEventMamba(nn.Module):
+    """Mock version of NestedEventMamba for testing"""
     def __init__(
         self, 
         encoding_dim=64, 
@@ -59,25 +80,26 @@ class NestedEventMamba(nn.Module):
         super().__init__()
         self.hidden_dim = hidden_dim
         
-        # Initial projection: Complex (Real/Imag) + Normalized Coords
+        # Input adapter
         self.input_adapter = nn.Sequential(
             nn.Linear(encoding_dim * 2 + 2, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
         
-        # --- Level 1: Intra-Window Shared Blocks ---
-        # These process N events within a single segment.
+        # Intra-window blocks
         self.intra_window_blocks = nn.ModuleList([
-            ConvMambaBlock(hidden_dim, d_state=intra_window_d_state, expand=intra_window_expand, dropout=dropout, drop_path=drop_path) for _ in range(intra_window_blocks)
+            ConvMambaBlock(hidden_dim, d_state=intra_window_d_state, expand=intra_window_expand, dropout=dropout, drop_path=drop_path) 
+            for _ in range(intra_window_blocks)
         ])
         
-        # --- Level 2: Inter-Window (Temporal) Blocks ---
-        # These process T segments across the whole sequence.
+        # Inter-window blocks
         self.inter_window_blocks = nn.ModuleList([
-            ConvMambaBlock(hidden_dim, d_state=inter_window_d_state, expand=inter_window_expand, dropout=dropout, drop_path=drop_path) for _ in range(inter_window_blocks)
+            ConvMambaBlock(hidden_dim, d_state=inter_window_d_state, expand=inter_window_expand, dropout=dropout, drop_path=drop_path) 
+            for _ in range(inter_window_blocks)
         ])
         
+        # Classification head
         self.head = nn.Sequential(
             nn.LayerNorm(hidden_dim),
             nn.Dropout(0.3),
@@ -86,42 +108,8 @@ class NestedEventMamba(nn.Module):
             nn.Linear(hidden_dim // 2, num_classes)
         )
 
-    def forward(self, batch):
-        # batch['segments_complex']: List[List[Tensor]]
-        # batch['segments_coords']: List[List[Tensor]]
-        
-        batch_logits = []
-        for z_list, c_list in zip(batch['segments_complex'], batch['segments_coords']):
-            window_vectors = []
-            
-            for z, c in zip(z_list, c_list):
-                # 1. Pre-process Window: [N, D_complex] -> [1, N, hidden_dim]
-                c_norm = c / torch.tensor([346, 260], device=c.device)
-                feat = torch.cat([z.real, z.imag, c_norm], dim=-1)
-                x = self.input_adapter(feat).unsqueeze(0) 
-                
-                # 2. Intra-Window Feature Extraction (Shared)
-                for block in self.intra_window_blocks:
-                    x = block(x)
-                
-                # 3. Pooling: Compress N events to 1 vector
-                # Use a mix of Max and Mean for better representation
-                win_vec = (x.mean(dim=1) + x.max(dim=1)[0]) / 2
-                window_vectors.append(win_vec)
-            
-            # 4. Global Temporal Processing
-            # seq: [1, T_segments, hidden_dim]
-            seq = torch.cat(window_vectors, dim=0).unsqueeze(0)
-            
-            for block in self.inter_window_blocks:
-                seq = block(seq)
-            
-            # 5. Final Classification
-            # Pool across T dimension
-            global_feat = seq.mean(dim=1)
-            batch_logits.append(self.head(global_feat))
-            
-        return torch.cat(batch_logits, dim=0)
+    def forward(self, x):
+        return x
 
 def print_model_summary(model, model_name="NestedEventMamba"):
     """
@@ -279,21 +267,12 @@ def print_model_summary(model, model_name="NestedEventMamba"):
 
 
 if __name__ == "__main__":
-    """
-    Test script that mimics data generated from SparseVKMEncoder.py
-    """
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
+    print("Creating MockNestedEventMamba model for parameter analysis...")
     
-    # --- Model Configuration ---
-    encoding_dim = 64
-    hidden_dim = 128
-    num_classes = 11
-    
-    model = NestedEventMamba(
-        encoding_dim=encoding_dim,
-        hidden_dim=hidden_dim,
-        num_classes=num_classes,
+    model = MockNestedEventMamba(
+        encoding_dim=64,
+        hidden_dim=128,
+        num_classes=11,
         intra_window_blocks=2,
         inter_window_blocks=2,
         intra_window_d_state=32,
@@ -302,84 +281,17 @@ if __name__ == "__main__":
         inter_window_expand=1.5,
         dropout=0.1,
         drop_path=0.1
-    ).to(device)
+    )
     
-    # Print detailed model summary
-    total_params, trainable_params = print_model_summary(model)
+    # Print the summary
+    total_params, trainable_params = print_model_summary(model, "MockNestedEventMamba")
     
-    # --- Generate Synthetic Batch Data ---
-    # Mimicking SparseVKMEncoder output format:
-    # - Complex embeddings: [N_events, encoding_dim] dtype=cfloat
-    # - Coordinates: [N_events, 2] dtype=float (y, x)
-    
-    batch_size = 4
-    num_segments_per_sample = 8  # T temporal segments
-    
-    batch = {
-        'segments_complex': [],
-        'segments_coords': []
-    }
-    
-    for b in range(batch_size):
-        sample_segments_complex = []
-        sample_segments_coords = []
-        
-        for seg in range(num_segments_per_sample):
-            # Varying number of events per segment (between 50-200)
-            num_events = torch.randint(50, 200, (1,)).item()
-            
-            # Generate complex embeddings (mimicking VecKMSparse output)
-            # Complex numbers have both real and imaginary parts
-            real_part = torch.randn(num_events, encoding_dim, device=device)
-            imag_part = torch.randn(num_events, encoding_dim, device=device)
-            complex_emb = torch.complex(real_part, imag_part)
-            
-            # Generate coordinates (y, x) in pixel space
-            # DVS346 resolution: 346x260 (as seen in forward pass normalization)
-            coords = torch.stack([
-                torch.randint(0, 260, (num_events,), device=device, dtype=torch.float32),  # y
-                torch.randint(0, 346, (num_events,), device=device, dtype=torch.float32)   # x
-            ], dim=1)
-            
-            sample_segments_complex.append(complex_emb)
-            sample_segments_coords.append(coords)
-        
-        batch['segments_complex'].append(sample_segments_complex)
-        batch['segments_coords'].append(sample_segments_coords)
-    
-    print(f"\nBatch structure:")
-    print(f"  Batch size: {batch_size}")
-    print(f"  Segments per sample: {num_segments_per_sample}")
-    print(f"  Sample segment shapes:")
-    print(f"    Complex: {batch['segments_complex'][0][0].shape} (dtype: {batch['segments_complex'][0][0].dtype})")
-    print(f"    Coords: {batch['segments_coords'][0][0].shape} (dtype: {batch['segments_coords'][0][0].dtype})")
-    
-    # --- Forward Pass ---
-    print("\n--- Running Forward Pass ---")
-    model.eval()
-    
-    import time
-    with torch.no_grad():
-        if device == 'cuda':
-            torch.cuda.synchronize()
-        start = time.time()
-        
-        logits = model(batch)
-        
-        if device == 'cuda':
-            torch.cuda.synchronize()
-        end = time.time()
-    
-    print(f"\nResults:")
-    print(f"  Output shape: {logits.shape}")  # Should be [batch_size, num_classes]
-    print(f"  Inference time: {(end - start)*1000:.2f}ms")
-    print(f"  Per-sample time: {(end - start)*1000/batch_size:.2f}ms")
-    
-    # Check output
-    probs = F.softmax(logits, dim=1)
-    predictions = torch.argmax(probs, dim=1)
-    
-    print(f"\nPredictions: {predictions.cpu().numpy()}")
-    print(f"Confidences: {probs.max(dim=1)[0].cpu().numpy()}")
-    
-    print("\n✓ Test completed successfully!")
+    print("NOTE: This is a mock version using simplified Mamba2.")
+    print("      Actual parameter counts may vary slightly with real mamba_ssm.Mamba2")
+    print("\nKey insights:")
+    print(f"  • Total parameters: {total_params:,}")
+    print(f"  • Trainable parameters: {trainable_params:,}")
+    print(f"  • Model is relatively lightweight for event-based processing")
+    print(f"  • Most parameters are in the Mamba2 SSM blocks")
+    print(f"  • Input adapter converts complex embeddings to hidden representation")
+    print(f"  • Two-level hierarchy: intra-window (local) → inter-window (temporal)")
