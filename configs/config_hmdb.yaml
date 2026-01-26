@@ -32,8 +32,8 @@ DATA:
       aug_time_scale_max: 1.2  # Maximum time scale for augmentation
 
   dataloader:
-    batch_size: 8  # Reduced for memory efficiency with Mamba2
-    test_batch_size: 8  # Reduced for validation
+    batch_size: 2  # Reduced for memory efficiency with Mamba2
+    test_batch_size: 2  # Reduced for validation
     num_workers: 8  # Reduced to avoid worker overhead
     persistent_workers: True
     pin_memory: True
@@ -44,7 +44,7 @@ DATA:
     shuffle_test: False
 
 MODEL:
-  file_name: new_ssm
+  file_name: semi_optimized_new_ssm
   class_name: NestedEventMamba
   model_init_args:
     # 3D SSM Architecture parameters
@@ -57,16 +57,17 @@ MODEL:
     inter_window_d_state: 32
     intra_window_expand: 2
     inter_window_expand: 2  # Must be integer for Mamba2
-    dropout: 0.2
-    drop_path: 0.2
+    dropout: 0.25
+    drop_path: 0.25
+    use_checkpointing: True
 
 OPTIMIZER:
   name: AdamW
   arguments:
     lr: 1e-3
-    weight_decay: 0.01  # Increased L2 Regularization (now excludes bias/norm)
+    weight_decay: 0.05  # Increased L2 Regularization (now excludes bias/norm)
   gradient_accumulation:
-    enabled: False
+    enabled: True
     scheduling: {0: 4}
   gradient_clip:
     enabled: False
