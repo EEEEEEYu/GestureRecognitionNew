@@ -183,7 +183,7 @@ class UCF101Preprocessor:
             if num_events_after_denoise == 0:
                 # All events were filtered out
                 empty_embeddings = torch.zeros(0, self.encoding_dim, dtype=torch.cfloat)
-                empty_coords = np.zeros((0, 4), dtype=np.float32)
+                empty_coords = np.zeros((0, 5), dtype=np.float32)
                 return empty_embeddings, empty_coords
         else:
             # No denoising, use original events
@@ -251,7 +251,7 @@ class UCF101Preprocessor:
         # If no queries selected, return empty
         if len(query_indices) == 0:
             empty_embeddings = torch.zeros(0, self.encoding_dim, dtype=torch.cfloat)
-            empty_coords = np.zeros((0, 4), dtype=np.float32)
+            empty_coords = np.zeros((0, 5), dtype=np.float32)
             return empty_embeddings, empty_coords
         
         # ===================================================================
@@ -420,6 +420,12 @@ class UCF101Preprocessor:
                 for rotation_angle in angles_to_use:
                     # Encode sample with rotation
                     encoded_sample = self.encode_sample(sample, rotation_angle=rotation_angle)
+                    
+                    # Check if sample has any vectors (skip completely empty samples)
+                    total_vectors = sum(encoded_sample['num_vectors_per_interval'])
+                    if total_vectors == 0:
+                        pbar.set_postfix({'skipped_empty': 'true', 'file': os.path.basename(sample['file_path'])})
+                        continue  # Skip this empty sample
                     
                     # Create a group for this sample
                     sample_group = h5f.create_group(f'sample_{sample_counter:06d}')

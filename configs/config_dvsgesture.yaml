@@ -4,7 +4,7 @@ TRAINING:
   inference_mode: False  # If this one is True, use inference
   seed: 42
   max_epochs: 100 # Increased from 50
-  label_smoothing: 0.05 # Soft targets to prevent overconfidence
+  label_smoothing: 0.1 # Soft targets to prevent overconfidence
 
 DISTRIBUTED:
   accelerator: gpu  # Changed from cpu - Mamba2 requires CUDA
@@ -46,32 +46,26 @@ DATA:
 
 MODEL:
   file_name: new_ssm
-  class_name: SpaceTimePolarSSM
+  class_name: NestedEventMamba
   model_init_args:
-    # DVSGesture input parameters
-    encoding_dim: 256  # From SparseVKMEncoder output
-    num_classes: ${DATA.dataset.dataset_init_args.num_classes}
-    # Pass resolution as list [width, height] which OmegaConf handles
-    resolution:
-      - ${DATA.dataset.dataset_init_args.width}
-      - ${DATA.dataset.dataset_init_args.height}
     # 3D SSM Architecture parameters
-    hidden_dim: 256
-    num_layers: 6  # Increased from 4 (deeper model enabled by weight sharing)
-    d_state: 128   # Increased from 64 (higher capacity for temporal dynamics)
-    d_conv: 4      # Reverted to 4 (max supported by optimized causal_conv1d kernel)
-    expand: 2      # Expansion factor in Mamba
-    share_weights: 'bidirectional' # Share weights between reverse pairs (3 groups). 6M params.
-    dropout: 0.2   # Reduced from 0.2 to prevent underfitting
-    drop_path: 0.1 # Reduced from 0.1
-    pooling_scales: [1, 2, 4]  # Multi-scale temporal pooling
-    use_checkpoint: True  # Gradient checkpointing for memory efficiency
+    encoding_dim: 256 
+    hidden_dim: 128
+    num_classes: ${DATA.dataset.dataset_init_args.num_classes}
+    intra_window_blocks: 2
+    inter_window_blocks: 2
+    intra_window_d_state: 32
+    inter_window_d_state: 32
+    intra_window_expand: 2
+    inter_window_expand: 2  # Must be integer for Mamba2
+    dropout: 0.2
+    drop_path: 0.2
 
 OPTIMIZER:
   name: AdamW
   arguments:
     lr: 1e-3
-    weight_decay: 0.01  # Increased L2 Regularization (now excludes bias/norm)
+    weight_decay: 0.05  # Increased L2 Regularization (now excludes bias/norm)
   gradient_accumulation:
     enabled: False
     scheduling: {0: 4}

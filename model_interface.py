@@ -247,18 +247,34 @@ class ModelInterface(pl.LightningModule):
     @staticmethod
     def filter_init_args(cls, config_dict):
         """
-        Checks if config_dict has all required arguments for cls.__init__
+        Filter config_dict to only include arguments accepted by cls.__init__.
+        
+        - Required parameters (no default) MUST be in config_dict.
+        - Optional parameters (with default) are included if present in config_dict.
         """
         init_args = dict()
-        for name in inspect.signature(cls.__init__).parameters.keys():
-            # Skip 'self', '*args', '**kwargs' and parameters with defaults
-            if name not in ('self'):
-                init_args[name] = config_dict[name]
-        provided_keys = set(config_dict.keys())
-        missing_keys = init_args.keys() - provided_keys
+        required_params = []
         
-        if missing_keys:
-            raise ValueError(f"In dataset initialization, found missing config keys for {cls.__name__}: {missing_keys}")
+        sig = inspect.signature(cls.__init__)
+        for name, param in sig.parameters.items():
+            # Skip 'self', '*args', '**kwargs'
+            if name == 'self':
+                continue
+            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                continue
+            
+            # Check if parameter has a default value
+            has_default = param.default is not inspect.Parameter.empty
+            
+            if name in config_dict:
+                # Parameter is in config, include it
+                init_args[name] = config_dict[name]
+            elif not has_default:
+                # Required parameter is missing
+                required_params.append(name)
+        
+        if required_params:
+            raise ValueError(f"In model initialization, missing required config keys for {cls.__name__}: {required_params}")
         
         return init_args
 

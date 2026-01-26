@@ -1,1 +1,1 @@
-python main.py --config_path configs/config_dvsgesture.yaml
+python main.py --config_path configs/config_hmdb.yaml

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mamba_ssm import Mamba2
+from mamba_ssm import Mamba
 from timm.layers import DropPath
 
 class ConvMambaBlock(nn.Module):
@@ -14,7 +14,7 @@ class ConvMambaBlock(nn.Module):
         self.norm1 = nn.LayerNorm(dim)
         # Depthwise Conv to enhance local features (spatial/temporal jitters)
         self.local_conv = nn.Conv1d(dim, dim, kernel_size=3, padding=1, groups=dim)
-        self.ssm = Mamba2(d_model=dim, d_state=d_state, expand=expand)
+        self.ssm = Mamba(d_model=dim, d_state=d_state, expand=expand)
         
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = nn.Sequential(
@@ -34,6 +34,8 @@ class ConvMambaBlock(nn.Module):
         # 1. Local + Global Branch
         # Transpose for Conv1d: [B, D, L]
         x_conv = self.local_conv(x.transpose(1, 2)).transpose(1, 2)
+        x_conv = x_conv.contiguous()
+
         x = self.ssm(x_conv + x) 
         x = res + self.drop_path(x)
         
@@ -52,7 +54,8 @@ class NestedEventMamba(nn.Module):
         intra_window_d_state=32,
         inter_window_d_state=32,
         intra_window_expand=2,
-        inter_window_expand=1.5,
+        inter_window_expand=2,
+
         dropout=0.1, 
         drop_path=0.1
     ):
@@ -96,9 +99,12 @@ class NestedEventMamba(nn.Module):
             
             for z, c in zip(z_list, c_list):
                 # 1. Pre-process Window: [N, D_complex] -> [1, N, hidden_dim]
-                c_norm = c / torch.tensor([346, 260], device=c.device)
-                feat = torch.cat([z.real, z.imag, c_norm], dim=-1)
-                x = self.input_adapter(feat).unsqueeze(0) 
+                feat = torch.cat([z.real, z.imag, c], dim=-1)
+                x = self.input_adapter(feat).unsqueeze(0)
+                
+                # CRITICAL: Ensure contiguous memory layout for causal_conv1d
+                # Variable-length sequences can create misaligned strides
+                x = x.contiguous()
                 
                 # 2. Intra-Window Feature Extraction (Shared)
                 for block in self.intra_window_blocks:
@@ -112,6 +118,9 @@ class NestedEventMamba(nn.Module):
             # 4. Global Temporal Processing
             # seq: [1, T_segments, hidden_dim]
             seq = torch.cat(window_vectors, dim=0).unsqueeze(0)
+            
+            # Ensure contiguous for inter-window processing
+            seq = seq.contiguous()
             
             for block in self.inter_window_blocks:
                 seq = block(seq)
