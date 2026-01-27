@@ -11,11 +11,11 @@ class ConvMambaBlock(nn.Module):
     The Core Building Block: Conv1d (Local) + Mamba2 (Global) + MLP.
     Designed for variable-length sequences [B, L, D].
     """
-    def __init__(self, dim, d_state=32, expand=2, dropout=0.1, drop_path=0.1):
+    def __init__(self, dim, d_state=32, expand=2, dropout=0.1, drop_path=0.1, kernel_size=3, padding=1):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         # Depthwise Conv to enhance local features (spatial/temporal jitters)
-        self.local_conv = nn.Conv1d(dim, dim, kernel_size=3, padding=1, groups=dim)
+        self.local_conv = nn.Conv1d(dim, dim, kernel_size=kernel_size, padding=padding, groups=dim)
         self.ssm = Mamba(d_model=dim, d_state=d_state, expand=expand)
         
         self.norm2 = nn.LayerNorm(dim)
@@ -57,7 +57,10 @@ class NestedEventMamba(nn.Module):
         inter_window_d_state=32,
         intra_window_expand=2,
         inter_window_expand=2,
-
+        intra_window_kernel_size=11,
+        inter_window_kernel_size=3,
+        intra_window_padding=5,
+        inter_window_padding=1,
         dropout=0.1, 
         drop_path=0.1,
         use_checkpointing=False

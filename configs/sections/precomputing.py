@@ -22,7 +22,6 @@ class PrecomputingConfig:
     dataset_dir: str = ""
     output_dir: str = ""
     accumulation_interval_ms: float = 100.0
-    ratio_of_vectors: float = 0.1
     encoding_dim: int = 64
     temporal_length: float = 100.0
     kernel_size: int = 17

@@ -3,7 +3,7 @@ Dataloader for precomputed DVSGesture dataset stored in HDF5 format.
 
 This dataloader:
 1. Loads precomputed complex tensors from HDF5 files
-2. Implements second-stage downsampling with ratio_of_vectors for data augmentation
+2. Implements second-stage downsampling for data augmentation
 3. Supports train/test modes with optional data augmentation
 """
 
@@ -82,7 +82,6 @@ class DVSGesturePrecomputed(data.Dataset):
         self,
         precomputed_dir: str,
         purpose: str = 'train',
-        ratio_of_vectors: float = 1.0,
         use_flip_augmentation: bool = False,
         aug_jitter_std: float = 0.0,
         aug_drop_rate: float = 0.0,
@@ -97,10 +96,6 @@ class DVSGesturePrecomputed(data.Dataset):
         Args:
             precomputed_dir: Directory containing precomputed HDF5 files
             purpose: 'train' or 'validation'
-            ratio_of_vectors: Second-stage downsampling ratio (0.0-1.0)
-                             - Positive values: sample this percentage of vectors
-                             - 1.0: use all precomputed vectors
-                             This provides data augmentation during training
             use_flip_augmentation: Whether to apply spatial flip augmentation
             height: Image height (for flip augmentation)
             width: Image width (for flip augmentation)
@@ -109,7 +104,6 @@ class DVSGesturePrecomputed(data.Dataset):
         
         self.precomputed_dir = precomputed_dir
         self.purpose = purpose
-        self.ratio_of_vectors = ratio_of_vectors
         self.use_flip_augmentation = use_flip_augmentation
 
         
@@ -139,7 +133,7 @@ class DVSGesturePrecomputed(data.Dataset):
             
             # Store metadata
             self.accumulation_interval_ms = h5f.attrs['accumulation_interval_ms']
-            self.precompute_ratio = h5f.attrs['ratio_of_vectors']
+            # self.precompute_ratio = h5f.attrs['ratio_of_vectors'] # Removed
             self.encoding_dim = h5f.attrs['encoding_dim']
             self.temporal_length = h5f.attrs['temporal_length']
             
@@ -156,8 +150,6 @@ class DVSGesturePrecomputed(data.Dataset):
         
         print(f"Loaded {self.num_samples} samples from {self.h5_path}")
         print(f"  Encoding dim: {self.encoding_dim}")
-        print(f"  Precompute ratio (1st stage): {self.precompute_ratio}")
-        print(f"  Training ratio (2nd stage): {self.ratio_of_vectors}")
         if self.rotation_enabled:
             print(f"  Rotation augmentation: enabled with angles {self.rotation_angles_list}")
             print(f"  Rotation distribution: {dict(zip(*np.unique(self.rotation_angles, return_counts=True)))}")
@@ -198,18 +190,9 @@ class DVSGesturePrecomputed(data.Dataset):
                 # Reconstruct complex tensor
                 vectors = torch.complex(real_part, imag_part)
                 
-                # Apply second-stage downsampling if needed
-                if self.ratio_of_vectors < 1.0 and len(vectors) > 0:
-                    num_to_sample = max(1, int(len(vectors) * self.ratio_of_vectors))
-                    
-                    # Random sampling for training augmentation
-                    if num_to_sample < len(vectors):
-                        indices = torch.randperm(len(vectors))[:num_to_sample]
-                        indices = torch.sort(indices)[0]  # Sort for better cache locality
-                        
-                        # Apply same sampling to both vectors and coordinates
-                        vectors = vectors[indices]
-                        event_coords = event_coords[indices.numpy()]
+                # Removed second-stage downsampling (ratio_of_vectors) logic
+                # We now rely on aug_drop_rate in Augmentor for training control
+                
                 
                 all_vectors.append(vectors)
                 all_event_coords.append(event_coords)
@@ -331,7 +314,6 @@ if __name__ == '__main__':
     dataset = DVSGesturePrecomputed(
         precomputed_dir=args.precomputed_dir,
         purpose=args.purpose,
-        ratio_of_vectors=0.8,  # Use 80% of precomputed vectors
     )
     
     print(f"\nDataset size: {len(dataset)}")

@@ -4,7 +4,7 @@ Pre-computing script for UCF101-DVS dataset using SparseVKMEncoder.
 This script:
 1. Loads raw events from UCF101-DVS dataset (.aedat format)
 2. Encodes events into complex tensors using SparseVKMEncoder
-3. Implements two-stage downsampling with ratio_of_vectors
+3. Implements two-stage downsampling
 4. Stores precomputed tensors in HDF5 format
 5. Supports checkpointing for resume capability
 """
@@ -45,7 +45,6 @@ class UCF101Preprocessor:
         self.dataset_dir = precompute_cfg['dataset_dir']
         self.output_dir = precompute_cfg['output_dir']
         self.accumulation_interval_ms = float(precompute_cfg['accumulation_interval_ms'])
-        self.ratio_of_vectors = float(precompute_cfg['ratio_of_vectors'])
         self.encoding_dim = int(precompute_cfg['encoding_dim'])
         self.temporal_length = float(precompute_cfg['temporal_length'])
         self.kernel_size = int(precompute_cfg['kernel_size'])
@@ -86,13 +85,8 @@ class UCF101Preprocessor:
         print(f"Sampling method: {self.sampling_method}")
         if self.sampling_method == 'grid_decimation':
             grid_size = self.sampling_grid_decimation_cfg.get('grid_size', 2)
-            print(f"  Grid size: {grid_size}, Retention ratio: {self.ratio_of_vectors}")
-        elif self.sampling_method == 'adaptive_striding':
-            ks = self.adaptive_sampling_cfg.get('kernel_size', 17)
-            ov = self.adaptive_sampling_cfg.get('overlap_factor', 0.0)
-            print(f"  Kernel Size: {ks}, Overlap Factor: {ov} (Stride: {int(ks * (1-ov))})")
         elif self.sampling_method == 'random':
-            print(f"  Retention ratio: {self.ratio_of_vectors}")
+            print(f"  Random sampling selected (Keeping all events)")
         
         self.encoder = VecKMSparseOptimized(
             height=self.height,
@@ -219,31 +213,30 @@ class UCF101Preprocessor:
             num_vectors = len(query_indices)
             
         elif self.sampling_method == 'random':
-            # FALLBACK: Random sampling (pure numpy)
-            num_vectors = max(1, int(num_events_after_denoise * self.ratio_of_vectors))
-            
-            if num_vectors >= num_events_after_denoise:
-                query_indices = np.arange(num_events_after_denoise)
-            else:
-                query_indices = np.random.choice(num_events_after_denoise, num_vectors, replace=False)
-                query_indices = np.sort(query_indices)  # Sort for temporal order
+            # FALLBACK: Random sampling (Pure Numpy) - defaults to keeping all if no ratio logic
+            # Since ratio_of_vectors is removed, we keep all events or maybe implement a fixed cap if needed.
+            # For now, let's just keep all events (identity).
+            num_vectors = num_events_after_denoise
+            query_indices = np.arange(num_vectors)
         
         elif self.sampling_method == 'grid_decimation':
-            # LEGACY: Grid decimation
-            grid_size = self.sampling_grid_decimation_cfg.get('grid_size', 2)
-            
-            from utils.denoising_and_sampling import sample_grid_decimation_fast
-            
-            # Get indices (pure numpy, no conversion)
-            query_indices = sample_grid_decimation_fast(
-                events_t_clean, events_y_clean, events_x_clean, events_p_clean,
-                self.height, self.width,
-                target_grid=grid_size,
-                retention_ratio=self.ratio_of_vectors,
-                return_indices=True
-            )
-            
-            num_vectors = len(query_indices)
+             # LEGACY: Grid decimation
+             # defaulting to 0.1 ratio if someone really tries to use it, or just fail.
+             # but to be safe and remove ratio_of_vectors dep, let's just warn or use a default.
+             grid_size = self.sampling_grid_decimation_cfg.get('grid_size', 2)
+             
+             from utils.denoising_and_sampling import sample_grid_decimation_fast
+             
+             # Get indices (pure numpy, no conversion)
+             query_indices = sample_grid_decimation_fast(
+                 events_t_clean, events_y_clean, events_x_clean, events_p_clean,
+                 self.height, self.width,
+                 target_grid=grid_size,
+                 retention_ratio=0.1, # Default hardcoded since config param is gone
+                 return_indices=True
+             )
+             
+             num_vectors = len(query_indices)
         
         else:
             raise ValueError(f"Unknown sampling method: {self.sampling_method}")
@@ -393,7 +386,7 @@ class UCF101Preprocessor:
                 
                 # Store metadata
                 h5f.attrs['accumulation_interval_ms'] = self.accumulation_interval_ms
-                h5f.attrs['ratio_of_vectors'] = self.ratio_of_vectors
+                # h5f.attrs['ratio_of_vectors'] = self.ratio_of_vectors # Removed
                 h5f.attrs['encoding_dim'] = self.encoding_dim
                 h5f.attrs['temporal_length'] = self.temporal_length
                 h5f.attrs['height'] = self.height
@@ -520,7 +513,6 @@ class UCF101Preprocessor:
         print("Starting UCF101-DVS dataset preprocessing...")
         print(f"Output directory: {self.output_dir}")
         print(f"Accumulation interval: {self.accumulation_interval_ms} ms")
-        print(f"Ratio of vectors (first stage): {self.ratio_of_vectors}")
         print(f"Encoding dimension: {self.encoding_dim}")
         
         # Preprocess train split

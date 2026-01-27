@@ -3,7 +3,7 @@ Helper function to create DVSGesture datasets from config.
 
 This module provides a convenient function to create train/val/test datasets
 from a configuration dictionary, automatically handling the second-stage
-ratio_of_vectors parameter.
+from a configuration dictionary.
 """
 
 from data import DVSGesturePrecomputed, collate_fn
@@ -41,29 +41,17 @@ def create_dvsgesture_datasets(config: Dict, purposes: list = ['train', 'validat
     height = dataset_config.get('height', 128)
     width = dataset_config.get('width', 128)
     use_flip_augmentation = dataset_config.get('use_flip_augmentation', False)
-    use_position_encoding = dataset_config.get('use_position_encoding', False)
-    
-    # Second-stage ratios (different for train/val)
-    train_ratio = dataset_config.get('train_ratio_of_vectors', 0.8)
-    val_ratio = dataset_config.get('val_ratio_of_vectors', 1.0)
+
     
     datasets = {}
     
     for purpose in purposes:
-        # Determine ratio_of_vectors based on purpose
-        if purpose == 'train':
-            ratio_of_vectors = train_ratio
-        else:  # validation, test
-            ratio_of_vectors = val_ratio
-        
         datasets[purpose] = DVSGesturePrecomputed(
             precomputed_dir=precomputed_dir,
             purpose=purpose,
-            ratio_of_vectors=ratio_of_vectors,
             use_flip_augmentation=use_flip_augmentation if purpose == 'train' else False,
             height=height,
             width=width,
-            use_position_encoding=use_position_encoding,
         )
     
     return datasets
@@ -155,7 +143,6 @@ if __name__ == '__main__':
     print(f"\nDatasets created:")
     for purpose, dataset in datasets.items():
         print(f"  {purpose}: {len(dataset)} samples")
-        print(f"    ratio_of_vectors: {dataset.ratio_of_vectors}")
     
     print("\nCreating dataloaders from config...")
     dataloaders = create_dvsgesture_dataloaders(config)

@@ -133,14 +133,6 @@ class DataInterface(pl.LightningDataModule):
                 # Required parameter missing
                 raise ValueError(f"Missing required parameter '{name}' for {cls.__name__}")
         
-        # Special handling for ratio_of_vectors (DVSGesture specific)
-        if 'ratio_of_vectors' in sig.parameters and 'ratio_of_vectors' not in init_args:
-            # Map train_ratio_of_vectors / val_ratio_of_vectors to ratio_of_vectors
-            if purpose == 'train' and 'train_ratio_of_vectors' in config_dict:
-                init_args['ratio_of_vectors'] = config_dict['train_ratio_of_vectors']
-            elif purpose in ('validation', 'test') and 'val_ratio_of_vectors' in config_dict:
-                init_args['ratio_of_vectors'] = config_dict['val_ratio_of_vectors']
-        
         return init_args
 
     def __load_data_module(self):

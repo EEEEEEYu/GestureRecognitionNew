@@ -25,7 +25,6 @@ DATA:
       use_flip_augmentation: False  # Random flip augmentation
       accumulation_interval_ms: 200.0  # Time interval for event accumulation
       train_split: 0.8  # 80% train, 20% validation
-      ratio_of_vectors: 1.0  # Use all precomputed vectors (no second-stage downsampling)
       aug_jitter_std: 0.5  # Coordinate jitter for augmentation
       aug_drop_rate: 0.1  # Event drop rate for augmentation
       aug_time_scale_min: 0.8  # Minimum time scale for augmentation
@@ -54,9 +53,13 @@ MODEL:
     intra_window_blocks: 2
     inter_window_blocks: 2
     intra_window_d_state: 32
-    inter_window_d_state: 32
+    inter_window_d_state: 16
     intra_window_expand: 2
     inter_window_expand: 2  # Must be integer for Mamba2
+    intra_window_kernel_size: 11
+    inter_window_kernel_size: 3
+    intra_window_padding: 5
+    inter_window_padding: 1
     dropout: 0.25
     drop_path: 0.25
     use_checkpointing: True
@@ -110,10 +113,9 @@ CHECKPOINT:
 PRECOMPUTING:
   dataset_dir: /fs/nexus-projects/DVS_Actions/HMDB_DVS
   output_dir: /fs/nexus-projects/DVS_Actions/HMDB_DVS/HMDB_precomputed_data
-  accumulation_interval_ms: 200.0  # Window size for splitting event stream
-  ratio_of_vectors: 0.1  # Retention ratio for sampling (what % of denoised events to keep as queries)
+  accumulation_interval_ms: 50.0  # Window size for splitting event stream
   encoding_dim: ${MODEL.model_init_args.encoding_dim}
-  temporal_length: 200.0  # Should match accumulation_interval_ms
+  temporal_length: 50.0  # Should match accumulation_interval_ms
   kernel_size: 17
   T_scale: 25.0
   S_scale: 25.0
@@ -148,7 +150,7 @@ PRECOMPUTING:
     # Selects queries to cover the spatial domain with kernel_size and specified overlap.
     adaptive_striding:
       kernel_size: ${PRECOMPUTING.kernel_size}  # Match encoder kernel size
-      overlap_factor: 0.8  # 0.0=Tiling, 0.5=Half-Overlap. Controls density.
+      overlap_factor: 0.5  # 0.0=Tiling, 0.5=Half-Overlap. Controls density.
     
     # Grid decimation parameters (used when method=grid_decimation)
     # This method uses stratified sampling with retention_ratio from ratio_of_vectors above
