@@ -50,12 +50,13 @@ class ConvMambaBlock(nn.Module):
         # 1. Local Conv: [B, L, D] -> [B, D, L]
         x_t = x_norm.transpose(1, 2)
         x_c = self.local_conv(x_t)
+        x_c = x_c.transpose(1, 2)
         x_c = self.act1(self.ln_conv(x_c)) 
         
         # Transpose back for SSM? No, SSM implementation details vary, 
         # but typical Mamba is [B, L, D]. Let's check `mamba_ssm`. 
         # Standard Mamba takes [B, L, D].
-        x_c_in = x_c.transpose(1, 2).contiguous()
+        x_c_in = x_c.contiguous()
         
         # 2. Global SSM
         # Research-backed: Should we add 'x' (residual) here? 
@@ -65,8 +66,9 @@ class ConvMambaBlock(nn.Module):
         # 3. Post-SSM Conv
         x_s_t = x_s.transpose(1, 2)
         x_out = self.post_conv(x_s_t)
+        x_out = x_out.transpose(1, 2)
         x_out = self.act_post(self.ln_post(x_out))
-        x_out = x_out.transpose(1, 2).contiguous()
+        x_out = x_out.contiguous()
         
         # Residual Connection
         x = res + self.drop_path(x_out)
