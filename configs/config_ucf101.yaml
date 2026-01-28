@@ -62,6 +62,8 @@ MODEL:
     inter_window_padding: 2
     dropout: 0.2
     drop_path: 0.2
+    use_checkpointing: True
+    use_bidirectional: False
 
 OPTIMIZER:
   name: AdamW

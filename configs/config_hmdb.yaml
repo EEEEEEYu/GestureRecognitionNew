@@ -63,6 +63,7 @@ MODEL:
     dropout: 0.25
     drop_path: 0.25
     use_checkpointing: True
+    use_bidirectional: False
 
 OPTIMIZER:
   name: AdamW
