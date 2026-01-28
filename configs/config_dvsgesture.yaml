@@ -98,7 +98,7 @@ SCHEDULER:
   
 LOGGER:
   log_dir_root: lightning_logs
-  experiment_name: hilbert_ssm_dvsgesture
+  experiment_name: ssm_dvsgesture
 
 CHECKPOINT:
   enabled: True

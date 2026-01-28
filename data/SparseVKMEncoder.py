@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class VecKMSparse(nn.Module):
     def __init__(
         self,
@@ -10,8 +11,8 @@ class VecKMSparse(nn.Module):
         encoding_dim: int,
         temporal_length: float,
         kernel_size: int = 17,
-        T_scale: float = 25.0,
-        S_scale: float = 25.0, 
+        T_scale: float = 5.0,
+        S_scale: float = 5.0, 
     ):
         super().__init__()
         # Convert to proper types (handles OmegaConf interpolation)
@@ -64,6 +65,8 @@ class VecKMSparse(nn.Module):
         
         # 2. Compute Temporal Embeddings: exp(i * t * T)
         # Shape: (N, D)
+
+        print(t_norm.max() - t_norm.min())
         temp_emb = torch.exp(1j * (t_norm.unsqueeze(1) @ self.T))
         
         # 3. Scatter-Add to Grid
@@ -130,18 +133,22 @@ class VecKMSparse(nn.Module):
         out_emb = out_emb * recenter_factor
         
         # 3. Normalize by count
+        # TODO: multiply scale by sqrt(encoding_dim)
         return out_emb / out_cnt.clamp(min=1)
 
 # --- Verification Script ---
 if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # Fix torch random seed
+    torch.manual_seed(42)
     
     # Init
     model = VecKMSparse(height=240, width=320, encoding_dim=64, temporal_length=100.0).to(device)
     
     # Fake Data (100k events)
     N = 300000
-    t = torch.sort(torch.rand(N))[0] * 100
+    t = torch.sort(torch.rand(N))[0] * 100 + 100.0
     y = torch.randint(0, 240, (N,))
     x = torch.randint(0, 320, (N,))
     
@@ -165,3 +172,4 @@ if __name__ == "__main__":
     
     print(f"Time: {end - start:.4f}s")
     print(f"Output shape: {res.shape}") # Should be (5000, 64)
+    print(f"Output: {res}")

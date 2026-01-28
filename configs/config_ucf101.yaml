@@ -23,7 +23,7 @@ DATA:
       width: 240
       num_classes: 101  # UCF101-DVS has 101 classes
       use_flip_augmentation: False  # Random flip augmentation
-      accumulation_interval_ms: 200.0  # Time interval for event accumulation
+      accumulation_interval_ms: 50.0  # Time interval for event accumulation
       train_split: 0.8  # 80% train, 20% validation
       aug_jitter_std: 0.5  # Coordinate jitter for augmentation
       aug_drop_rate: 0.1  # Event drop rate for augmentation
@@ -57,9 +57,9 @@ MODEL:
     intra_window_expand: 2
     inter_window_expand: 2  # Must be integer for Mamba2
     intra_window_kernel_size: 11
-    inter_window_kernel_size: 3
+    inter_window_kernel_size: 5
     intra_window_padding: 5
-    inter_window_padding: 1
+    inter_window_padding: 2
     dropout: 0.2
     drop_path: 0.2
 
@@ -112,9 +112,9 @@ CHECKPOINT:
 PRECOMPUTING:
   dataset_dir: /fs/nexus-projects/DVS_Actions/UCF101_DVS
   output_dir: /fs/nexus-projects/DVS_Actions/UCF101_DVS/UCF101_precomputed_data
-  accumulation_interval_ms: 200.0  # Window size for splitting event stream
+  accumulation_interval_ms: ${DATA.dataset.dataset_init_args.accumulation_interval_ms}  # Window size for splitting event stream
   encoding_dim: ${MODEL.model_init_args.encoding_dim}
-  temporal_length: 200.0  # Should match accumulation_interval_ms
+  temporal_length: ${DATA.dataset.dataset_init_args.accumulation_interval_ms}  # Should match accumulation_interval_ms
   kernel_size: 17
   T_scale: 25.0
   S_scale: 25.0
@@ -149,7 +149,7 @@ PRECOMPUTING:
     # Selects queries to cover the spatial domain with kernel_size and specified overlap.
     adaptive_striding:
       kernel_size: ${PRECOMPUTING.kernel_size}  # Match encoder kernel size
-      overlap_factor: 0.8  # 0.0=Tiling, 0.5=Half-Overlap. Controls density.
+      overlap_factor: 0.75  # 0.0=Tiling, 0.5=Half-Overlap. Controls density.
     
     # Grid decimation parameters (used when method=grid_decimation)
     # This method uses stratified sampling with retention_ratio from ratio_of_vectors above
