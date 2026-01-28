@@ -12,6 +12,7 @@ Usage: Drop-in replacement for VecKMSparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 class VecKMSparseOptimized(nn.Module):
     def __init__(
@@ -21,8 +22,8 @@ class VecKMSparseOptimized(nn.Module):
         encoding_dim: int,
         temporal_length: float,
         kernel_size: int = 17,
-        T_scale: float = 25.0,
-        S_scale: float = 25.0, 
+        T_scale: float = 3.0,
+        S_scale: float = 3.0, 
     ):
         super().__init__()
         self.height = height
@@ -89,7 +90,10 @@ class VecKMSparseOptimized(nn.Module):
         # ------------------------------------------------------------------
         
         # 1. Normalize Time 
-        t_norm = t / self.temporal_length 
+        t_ref = t.min().detach()
+        t_centered = t - t_ref
+        
+        t_norm = t_centered / self.temporal_length 
         
         # 2. Compute Temporal Embeddings: exp(i * t * T)
         # Shape: (N, D)
@@ -171,14 +175,15 @@ class VecKMSparseOptimized(nn.Module):
         # ------------------------------------------------------------------
         
         # 1. Compute re-centering factor for the queries
-        qt_norm = query_t / self.temporal_length
+        qt_centered = query_t - t_ref
+        qt_norm = qt_centered / self.temporal_length
         recenter_factor = torch.exp(-1j * (qt_norm.unsqueeze(1) @ self.T))
         
         # 2. Apply re-centering
         out_emb = out_emb * recenter_factor
         
         # 3. Normalize by count
-        return out_emb / out_cnt.clamp(min=1)
+        return out_emb * math.sqrt(self.encoding_dim) / out_cnt.clamp(min=1)
 
 
 
@@ -197,11 +202,16 @@ if __name__ == "__main__":
     # Create both models
     print("\nInitializing models...")
     from SparseVKMEncoder import VecKMSparse
+    
+    # Init original with seed 42
+    torch.manual_seed(42)
     model_original = VecKMSparse(
         height=height, width=width, encoding_dim=encoding_dim,
         temporal_length=temporal_length, kernel_size=17
     ).to(device)
     
+    # Init optimized with SAME seed 42
+    torch.manual_seed(42)
     model_optimized = VecKMSparseOptimized(
         height=height, width=width, encoding_dim=encoding_dim,
         temporal_length=temporal_length, kernel_size=17
