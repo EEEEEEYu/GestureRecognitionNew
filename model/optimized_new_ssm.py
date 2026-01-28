@@ -18,7 +18,7 @@ class ConvMambaBlock(nn.Module):
         
         # 1. Depthwise Conv to enhance local features (spatial/temporal jitters)
         self.local_conv = nn.Conv1d(dim, dim, kernel_size=kernel_size, padding=padding, groups=dim)
-        self.bn_conv = nn.BatchNorm1d(dim)
+        self.ln_conv = nn.LayerNorm(dim)
         self.act1 = nn.SiLU()
         
         # 2. SSM
@@ -26,7 +26,7 @@ class ConvMambaBlock(nn.Module):
         
         # 3. Post-SSM Conv
         self.post_conv = nn.Conv1d(dim, dim, kernel_size=3, padding=1, groups=dim)
-        self.bn_post = nn.BatchNorm1d(dim)
+        self.ln_post = nn.LayerNorm(dim)
         self.act_post = nn.SiLU()
         
         # 4. Feed-Forward
@@ -50,7 +50,7 @@ class ConvMambaBlock(nn.Module):
         # 1. Local Conv: [B, L, D] -> [B, D, L]
         x_t = x_norm.transpose(1, 2)
         x_c = self.local_conv(x_t)
-        x_c = self.act1(self.bn_conv(x_c)) 
+        x_c = self.act1(self.ln_conv(x_c)) 
         
         # Transpose back for SSM? No, SSM implementation details vary, 
         # but typical Mamba is [B, L, D]. Let's check `mamba_ssm`. 
@@ -60,12 +60,12 @@ class ConvMambaBlock(nn.Module):
         # 2. Global SSM
         # Research-backed: Should we add 'x' (residual) here? 
         # Current plan: Remove 'x' input to SSM to let Conv features dominate.
-        x_s = self.ssm(x_c_in)
+        x_s = self.ssm(x_c_in + x_norm)
         
         # 3. Post-SSM Conv
         x_s_t = x_s.transpose(1, 2)
         x_out = self.post_conv(x_s_t)
-        x_out = self.act_post(self.bn_post(x_out))
+        x_out = self.act_post(self.ln_post(x_out))
         x_out = x_out.transpose(1, 2).contiguous()
         
         # Residual Connection
