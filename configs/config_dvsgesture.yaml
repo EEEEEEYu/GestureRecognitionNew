@@ -33,7 +33,7 @@ DATA:
   dataloader:
     batch_size: 8  # Reduced for memory efficiency with Mamba2
     test_batch_size: 8  # Reduced for validation
-    num_workers: 8  # Reduced to avoid worker overhead
+    num_workers: 4  # Reduced to avoid worker overhead
     persistent_workers: True
     pin_memory: True
     multiprocessing_context: fork

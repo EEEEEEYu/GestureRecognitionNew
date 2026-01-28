@@ -24,6 +24,9 @@ OmegaConf.register_new_resolver("div", lambda x, y: x / y)
 OmegaConf.register_new_resolver("add", lambda x, y: x + y)
 OmegaConf.register_new_resolver("subtract", lambda x, y: x - y)
 
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
+
 import lightning.pytorch as pl
 import lightning.pytorch.callbacks as plc
 from lightning.pytorch import Trainer
