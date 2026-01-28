@@ -57,9 +57,9 @@ MODEL:
     intra_window_expand: 2
     inter_window_expand: 2  # Must be integer for Mamba2
     intra_window_kernel_size: 11
-    inter_window_kernel_size: 3
+    inter_window_kernel_size: 5
     intra_window_padding: 5
-    inter_window_padding: 1
+    inter_window_padding: 2
     dropout: 0.2
     drop_path: 0.2
 
@@ -116,8 +116,8 @@ PRECOMPUTING:
   encoding_dim: ${MODEL.model_init_args.encoding_dim}
   temporal_length: 50.0  # Should match accumulation_interval_ms
   kernel_size: 17
-  T_scale: 25.0
-  S_scale: 25.0
+  T_scale: 3.0
+  S_scale: 3.0
   height: 128
   width: 128
   num_workers: 8  # Number of workers for parallel preprocessing

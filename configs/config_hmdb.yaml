@@ -57,9 +57,9 @@ MODEL:
     intra_window_expand: 2
     inter_window_expand: 2  # Must be integer for Mamba2
     intra_window_kernel_size: 11
-    inter_window_kernel_size: 3
+    inter_window_kernel_size: 5
     intra_window_padding: 5
-    inter_window_padding: 1
+    inter_window_padding: 2
     dropout: 0.25
     drop_path: 0.25
     use_checkpointing: True
@@ -117,8 +117,8 @@ PRECOMPUTING:
   encoding_dim: ${MODEL.model_init_args.encoding_dim}
   temporal_length: ${DATA.dataset.dataset_init_args.accumulation_interval_ms}  # Should match accumulation_interval_ms
   kernel_size: 17
-  T_scale: 25.0
-  S_scale: 25.0
+  T_scale: 3.0
+  S_scale: 3.0
   height: 180
   width: 240
   num_workers: 8  # Number of workers for parallel preprocessing
@@ -138,7 +138,7 @@ PRECOMPUTING:
   denoising:
     enabled: True  # Set to False to disable denoising
     grid_size: 2  # Spatial grid size for noise filtering (pixels)
-    threshold: 6  # Minimum events per grid cell to survive filtering
+    threshold: 8  # Minimum events per grid cell to survive filtering
   
   # Sampling strategy for query selection
   # Determines how to select which events become query vectors for VecKM encoding

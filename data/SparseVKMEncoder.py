@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 
 class VecKMSparse(nn.Module):
@@ -11,8 +12,8 @@ class VecKMSparse(nn.Module):
         encoding_dim: int,
         temporal_length: float,
         kernel_size: int = 17,
-        T_scale: float = 5.0,
-        S_scale: float = 5.0, 
+        T_scale: float = 3.0,
+        S_scale: float = 3.0, 
     ):
         super().__init__()
         # Convert to proper types (handles OmegaConf interpolation)
@@ -60,13 +61,14 @@ class VecKMSparse(nn.Module):
         # ------------------------------------------------------------------
         
         # 1. Normalize Time 
-        # removed "2 * pi" scaling and "t_ref" subtraction as requested
-        t_norm = t / self.temporal_length 
+        # Use relative time for numerical stability (bit-exact invariance)
+        t_ref = t.min().detach()
+        t_centered = t - t_ref
+        
+        t_norm = t_centered / self.temporal_length 
         
         # 2. Compute Temporal Embeddings: exp(i * t * T)
         # Shape: (N, D)
-
-        print(t_norm.max() - t_norm.min())
         temp_emb = torch.exp(1j * (t_norm.unsqueeze(1) @ self.T))
         
         # 3. Scatter-Add to Grid
@@ -125,7 +127,9 @@ class VecKMSparse(nn.Module):
         # Algorithm Line 20: emb_k = emb_k * exp(-i * (t_k/dt) * T) / cnt_k
         
         # 1. Compute re-centering factor for the queries
-        qt_norm = query_t / self.temporal_length
+        # We must use the same reference time
+        qt_centered = query_t - t_ref
+        qt_norm = qt_centered / self.temporal_length
         # Note the negative sign (-1j) for subtraction
         recenter_factor = torch.exp(-1j * (qt_norm.unsqueeze(1) @ self.T))
         
@@ -133,8 +137,7 @@ class VecKMSparse(nn.Module):
         out_emb = out_emb * recenter_factor
         
         # 3. Normalize by count
-        # TODO: multiply scale by sqrt(encoding_dim)
-        return out_emb / out_cnt.clamp(min=1)
+        return out_emb * math.sqrt(self.encoding_dim) / out_cnt.clamp(min=1)
 
 # --- Verification Script ---
 if __name__ == "__main__":
@@ -152,12 +155,13 @@ if __name__ == "__main__":
     y = torch.randint(0, 240, (N,))
     x = torch.randint(0, 320, (N,))
     
-    # Fake Queries (5000 points)
+    # Sample Queries from Events (Subset of events)
     num_queries = 10000
-    qy = torch.randint(0, 240, (num_queries,))
-    qx = torch.randint(0, 320, (num_queries,))
-    # Queries usually have their own timestamps (e.g. they are a subset of events)
-    qt = torch.rand(num_queries) * 100 
+    indices = torch.randperm(N)[:num_queries]
+    
+    qy = y[indices]
+    qx = x[indices]
+    qt = t[indices]
     
     import time
     torch.cuda.synchronize() if device == 'cuda' else None
