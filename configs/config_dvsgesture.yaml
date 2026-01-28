@@ -43,7 +43,7 @@ DATA:
     shuffle_test: False
 
 MODEL:
-  file_name: semi_optimized_new_ssm
+  file_name: optimized_new_ssm
   class_name: NestedEventMamba
   model_init_args:
     # 3D SSM Architecture parameters
