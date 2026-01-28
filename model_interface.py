@@ -234,8 +234,8 @@ class ModelInterface(pl.LightningModule):
             
             # If batch_size is provided, log the metric. If None (mixed up), we log manually in training_step.
             if batch_size is not None:
-                self.log(f'{stage}_CE_loss', CE_loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
-                self.log(f'{stage}_loss', CE_loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch_size)
+                self.log(f'{stage}_CE_loss', CE_loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=batch_size)
+                self.log(f'{stage}_loss', CE_loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=batch_size)
 
             final_loss = CE_loss
 
