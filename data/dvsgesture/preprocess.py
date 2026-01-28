@@ -28,7 +28,7 @@ sys.path.insert(0, project_root)
 from data.dvsgesture.dataset import DVSGesture
 from data.SparseVKMEncoderOptimized import VecKMSparseOptimized
 from utils.event_augmentation import rotate_sliced_events
-from utils.denoising_and_sampling import filter_noise_spatial, sample_grid_decimation_fast
+from utils.denoising_and_sampling import filter_noise_spatial
 
 
 class DVSGesturePreprocessor:
@@ -70,7 +70,6 @@ class DVSGesturePreprocessor:
         # Sampling strategy configuration (applied AFTER denoising)
         sampling_cfg = OmegaConf.select(precompute_cfg, 'sampling', default={})
         self.sampling_method = OmegaConf.select(sampling_cfg, 'method', default='random')
-        self.sampling_grid_decimation_cfg = OmegaConf.select(sampling_cfg, 'grid_decimation', default={'grid_size': 4})
         self.adaptive_sampling_cfg = OmegaConf.select(sampling_cfg, 'adaptive_striding', default={'kernel_size': 17, 'overlap_factor': 0.0})
         
         # Create output directory
@@ -83,10 +82,12 @@ class DVSGesturePreprocessor:
         if self.denoising_enabled:
             print(f"  Grid size: {self.denoising_grid_size}, Threshold: {self.denoising_threshold}")
         print(f"Sampling method: {self.sampling_method}")
-        if self.sampling_method == 'grid_decimation':
-            grid_size = self.sampling_grid_decimation_cfg.get('grid_size', 2)
-        elif self.sampling_method == 'random':
+        if self.sampling_method == 'random':
             print(f"  Random sampling selected (Keeping all events)")
+        elif self.sampling_method == 'adaptive_striding':
+            print(f"  Adaptive striding selected (Kernel size: {self.adaptive_sampling_cfg['kernel_size']}, Overlap factor: {self.adaptive_sampling_cfg['overlap_factor']})")
+        else:
+            raise ValueError(f"Unknown sampling method: {self.sampling_method}")
         
         self.encoder = VecKMSparseOptimized(
             height=self.height,
@@ -216,20 +217,6 @@ class DVSGesturePreprocessor:
             num_vectors = num_events_after_denoise
             query_indices = np.arange(num_vectors)
         
-        elif self.sampling_method == 'grid_decimation':
-             # LEGACY: Grid decimation
-             # defaulting to 0.1 ratio if someone really tries to use it, or just fail.
-             # but to be safe and remove ratio_of_vectors dep, let's just warn or use a default.
-             grid_size = self.sampling_grid_decimation_cfg.get('grid_size', 2)
-             from utils.denoising_and_sampling import sample_grid_decimation_fast
-             query_indices = sample_grid_decimation_fast(
-                 events_t_clean, events_y_clean, events_x_clean, events_p_clean,
-                 self.height, self.width,
-                 target_grid=grid_size,
-                 retention_ratio=0.1, # Default hardcoded since config param is gone
-                 return_indices=True
-             )
-             num_vectors = len(query_indices)
         else:
             raise ValueError(f"Unknown sampling method: {self.sampling_method}")
         

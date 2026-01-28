@@ -144,18 +144,13 @@ PRECOMPUTING:
   # Determines how to select which events become query vectors for VecKM encoding
   # Applied AFTER denoising
   sampling:
-    method: adaptive_striding  # Options: 'random', 'grid_decimation', 'adaptive_striding' (recommended)
+    method: adaptive_striding  # Options: 'random', 'adaptive_striding' (recommended)
     
     # Kernel-Aware Adaptive Striding
     # Selects queries to cover the spatial domain with kernel_size and specified overlap.
     adaptive_striding:
       kernel_size: ${PRECOMPUTING.kernel_size}  # Match encoder kernel size
       overlap_factor: 0.75  # 0.0=Tiling, 0.5=Half-Overlap. Controls density.
-    
-    # Grid decimation parameters (used when method=grid_decimation)
-    # This method uses stratified sampling with retention_ratio from ratio_of_vectors above
-    grid_decimation:
-      grid_size: 2  # Spatial grid size for stratified sampling (smaller = finer sampling)
 
 BENCHMARKING:
   # Benchmark settings for automated parameter search
