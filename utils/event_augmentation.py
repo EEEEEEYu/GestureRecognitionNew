@@ -183,10 +183,8 @@ def rotate_events(
     elif angle_deg == 270:
         return rotate_events_270deg(events_xy, events_t, events_p, height, width)
     else:
-        raise ValueError(
-            f"Unsupported rotation angle: {angle_deg}. "
-            f"Only cardinal rotations (0, 90, 180, 270) are supported."
-        )
+        # For non-cardinal angles, use arbitrary rotation
+        return rotate_events_arbitrary(events_xy, events_t, events_p, angle_deg, height, width)
 
 
 def rotate_sliced_events(
@@ -224,3 +222,69 @@ def rotate_sliced_events(
         rotated_p_sliced.append(rot_p)
     
     return rotated_xy_sliced, rotated_t_sliced, rotated_p_sliced
+
+
+def rotate_events_arbitrary(
+    events_xy: np.ndarray,
+    events_t: np.ndarray,
+    events_p: np.ndarray,
+    angle_deg: float,
+    height: int,
+    width: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Rotate events by an ARBITRARY angle around image center.
+    
+    Uses vectorized NumPy operations and rotation matrix.
+    Note: Arbitrary rotation introduces quantization error as float coordinates
+    must be rounded back to integers.
+    
+    Args:
+        events_xy: Event coordinates [N, 2]
+        events_t: Event timestamps [N]
+        events_p: Event polarities [N]
+        angle_deg: Rotation angle in degrees
+        height: Image height
+        width: Image width
+        
+    Returns:
+        Tuple of (rotated_xy, timestamps, polarities)
+    """
+    if len(events_xy) == 0:
+        return events_xy.copy(), events_t.copy(), events_p.copy()
+        
+    # Convert to radians
+    theta = np.deg2rad(angle_deg)
+    
+    # Rotation Matrix
+    # [ cos -sin ]
+    # [ sin  cos ]
+    c, s = np.cos(theta), np.sin(theta)
+    R = np.array([[c, -s], [s, c]])
+    
+    # Center of rotation
+    center_x = (width - 1) / 2.0
+    center_y = (height - 1) / 2.0
+    
+    # 1. Center the coordinates
+    coords = events_xy.astype(np.float32)
+    coords[:, 0] -= center_x
+    coords[:, 1] -= center_y
+    
+    # 2. Rotate (Matrix Multiplication)
+    # R is (2, 2), coords is (N, 2). New coords = coords @ R.T
+    coords_rotated = coords @ R.T
+    
+    # 3. Un-center
+    coords_rotated[:, 0] += center_x
+    coords_rotated[:, 1] += center_y
+    
+    # 4. Round and Clip
+    # This step is destructive (quantization)
+    coords_rotated = np.round(coords_rotated).astype(np.int32)
+    
+    # Clip to bounds
+    coords_rotated[:, 0] = np.clip(coords_rotated[:, 0], 0, width - 1)
+    coords_rotated[:, 1] = np.clip(coords_rotated[:, 1], 0, height - 1)
+    
+    return coords_rotated, events_t.copy(), events_p.copy()

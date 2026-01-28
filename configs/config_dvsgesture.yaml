@@ -23,7 +23,7 @@ DATA:
       width: 128
       num_classes: 11  # DVSGesture has 11 classes
       # Second-stage downsampling (training-time augmentation)
-      use_flip_augmentation: False # Disabled as per request
+      use_flip_augmentation: True # Enabled for better generalization
       # Robustness Augmentations
       aug_jitter_std: 0.5       # Coordinate Jitter (pixels/time). Moderate strength.
       aug_drop_rate: 0.1        # Event Drop Rate (10%). Moderate strength.

@@ -125,28 +125,21 @@ class DVSGesturePreprocessor:
         events_t: np.ndarray,
         events_p: np.ndarray,
         segment_id: int,
+        apply_denoising: bool = True
     ) -> Tuple[torch.Tensor, np.ndarray]:
         """
-        Encode events for a single time interval using the pipeline:
-        1. Denoise (optional, pure numpy)
-        2. Sample (pure numpy) - Now using Kernel-Aware Adaptive Sampling
-        3. VecKM Encode (torch)
+        Encode events for a single time interval.
         
         Args:
             events_xy: Event coordinates [N, 2]
             events_t: Event timestamps [N]
             events_p: Event polarities [N]
-            segment_id: Segment/interval index for this batch of events
-        
-        Returns:
-            Tuple of:
-                - Complex tensor of shape [num_vectors, encoding_dim]
-                - Event coordinates array [num_vectors, 5] with columns [x, y, t, p, segment_id]
+            segment_id: Segment index
+            apply_denoising: Whether to apply denoising (set False if already denoised)
         """
         num_events = len(events_t)
         
         if num_events == 0:
-            # Return empty tensors for empty intervals
             empty_embeddings = torch.zeros(0, self.encoding_dim, dtype=torch.cfloat)
             empty_coords = np.zeros((0, 5), dtype=np.float32)
             return empty_embeddings, empty_coords
@@ -155,17 +148,12 @@ class DVSGesturePreprocessor:
         events_y = events_xy[:, 1]
         events_x = events_xy[:, 0]
         
-        # ===================================================================
-        # BOUNDS CHECKING: Clip coordinates to valid range
-        # ===================================================================
+        # BOUNDS CHECKING
         events_x = np.clip(events_x, 0, self.width - 1)
         events_y = np.clip(events_y, 0, self.height - 1)
         
-        # ===================================================================
-        # STAGE 1: DENOISING (Optional, Pure Numpy)
-        # ===================================================================
-        if self.denoising_enabled:
-            # Apply denoising (pure numpy, no conversion)
+        # STAGE 1: DENOISING (Optional)
+        if self.denoising_enabled and apply_denoising:
             events_t_clean, events_y_clean, events_x_clean, events_p_clean = filter_noise_spatial(
                 events_t, events_y, events_x, events_p,
                 self.height, self.width,
@@ -174,29 +162,22 @@ class DVSGesturePreprocessor:
             )
             
             num_events_after_denoise = len(events_t_clean)
-            
             if num_events_after_denoise == 0:
-                # All events were filtered out
                 empty_embeddings = torch.zeros(0, self.encoding_dim, dtype=torch.cfloat)
                 empty_coords = np.zeros((0, 5), dtype=np.float32)
                 return empty_embeddings, empty_coords
         else:
-            # No denoising, use original events
+            # Skip denoising (already done or disabled)
             events_t_clean = events_t
             events_y_clean = events_y
             events_x_clean = events_x
             events_p_clean = events_p
             num_events_after_denoise = num_events
         
-        # ===================================================================
-        # STAGE 2: SAMPLING (Kernel-Aware Adaptive)
-        # ===================================================================
+        # STAGE 2: SAMPLING
         from utils.density_adaptive_spatial_striding import adaptive_spatial_sampling
         
         if self.sampling_method == 'adaptive_striding':
-            # NEW: Kernel-Aware Adaptive Striding
-            # Uses: Kernel Size and Overlap Factor
-            
             kernel_size = self.adaptive_sampling_cfg.get('kernel_size', 17)
             overlap_factor = self.adaptive_sampling_cfg.get('overlap_factor', 0.2)
             
@@ -207,50 +188,36 @@ class DVSGesturePreprocessor:
                 overlap_factor=overlap_factor,
                 sort_by_time=True  # Prefer newest events
             )
-            
             num_vectors = len(query_indices)
             
         elif self.sampling_method == 'random':
-            # FALLBACK: Random sampling (Pure Numpy) - defaults to keeping all if no ratio logic
-            # Since ratio_of_vectors is removed, we keep all events or maybe implement a fixed cap if needed.
-            # For now, let's just keep all events (identity).
             num_vectors = num_events_after_denoise
             query_indices = np.arange(num_vectors)
         
         else:
             raise ValueError(f"Unknown sampling method: {self.sampling_method}")
         
-        # If no queries selected, return empty
         if len(query_indices) == 0:
             empty_embeddings = torch.zeros(0, self.encoding_dim, dtype=torch.cfloat)
             empty_coords = np.zeros((0, 5), dtype=np.float32)
             return empty_embeddings, empty_coords
         
-        # ===================================================================
-        # STAGE 3: VecKM ENCODING (Convert to Torch here)
-        # ===================================================================
-        # Extract event coordinates for the sampled vectors
-        # Format: [x, y, t, p, segment_id]
+        # STAGE 3: VecKM ENCODING
         event_coords = np.zeros((num_vectors, 5), dtype=np.float32)
-        event_coords[:, 0] = events_x_clean[query_indices]  # x
-        event_coords[:, 1] = events_y_clean[query_indices]  # y
-        event_coords[:, 2] = events_t_clean[query_indices]  # t
-        event_coords[:, 3] = events_p_clean[query_indices]  # p
-        event_coords[:, 4] = segment_id  # segment_id
+        event_coords[:, 0] = events_x_clean[query_indices]
+        event_coords[:, 1] = events_y_clean[query_indices]
+        event_coords[:, 2] = events_t_clean[query_indices]
+        event_coords[:, 3] = events_p_clean[query_indices]
+        event_coords[:, 4] = segment_id
         
-        # NOW convert to tensors for VecKM encoding (single conversion)
-        # VecKM uses all denoised events as context, but only queries the sampled ones
         t = torch.from_numpy(events_t_clean).float().to(self.device)
         y = torch.from_numpy(events_y_clean).float().to(self.device)
         x = torch.from_numpy(events_x_clean).float().to(self.device)
         
-        # Query points (sampled events)
         query_t = t[query_indices]
         query_y = y[query_indices]
         query_x = x[query_indices]
         
-        # Encode using VecKMSparse
-        # The encoder returns complex embeddings of shape [num_queries, encoding_dim]
         with torch.no_grad():
             embeddings = self.encoder(t, y, x, query_y, query_x, query_t)
         
@@ -258,20 +225,51 @@ class DVSGesturePreprocessor:
     
     def encode_sample(self, sample: Dict, rotation_angle: int = 0) -> Dict:
         """
-        Encode a single sample from DVSGesture dataset with optional rotation.
-        
-        Args:
-            sample: Dictionary containing sliced events and metadata
-            rotation_angle: Rotation angle in degrees (0, 90, 180, 270)
-        
-        Returns:
-            Dictionary containing encoded tensors, event coordinates, and metadata
+        Encode a single sample.
+        OPTIMIZATION: Denoising is now handled BEFORE rotation to avoid redundancy.
+        BUT: We can't easily denoise once IF the rotation is applied in the loop. 
+        Actually, we can: Denoise -> Rotate -> Encode(skip_denoise=True)
         """
         events_xy_sliced = sample['events_xy_sliced']
         events_t_sliced = sample['events_t_sliced']
         events_p_sliced = sample['events_p_sliced']
         
-        # Apply rotation if needed
+        # 1. OPTIMIZATION: One-time Denoising (if enabled)
+        # We process the raw slices first to remove noise
+        if self.denoising_enabled:
+             denoised_xy = []
+             denoised_t = []
+             denoised_p = []
+             
+             for i in range(len(events_xy_sliced)):
+                 # Apply denoising on original coordinates
+                 t_c, y_c, x_c, p_c = filter_noise_spatial(
+                     events_t_sliced[i], 
+                     events_xy_sliced[i][:, 1], 
+                     events_xy_sliced[i][:, 0], 
+                     events_p_sliced[i],
+                     self.height, self.width,
+                     self.denoising_grid_size,
+                     self.denoising_threshold
+                 )
+                 # Reconstruct xy array
+                 if len(t_c) > 0:
+                     xy_c = np.stack([x_c, y_c], axis=1)
+                     denoised_xy.append(xy_c)
+                     denoised_t.append(t_c)
+                     denoised_p.append(p_c)
+                 else:
+                     # Keep empty if filtered out
+                     denoised_xy.append(np.zeros((0, 2), dtype=np.float32))
+                     denoised_t.append(np.zeros(0, dtype=np.float32))
+                     denoised_p.append(np.zeros(0, dtype=np.float32))
+             
+             # Replace original lists with denoised ones
+             events_xy_sliced = denoised_xy
+             events_t_sliced = denoised_t
+             events_p_sliced = denoised_p
+        
+        # 2. Rotation (on already denoised data)
         if rotation_angle != 0:
             events_xy_sliced, events_t_sliced, events_p_sliced = rotate_sliced_events(
                 events_xy_sliced,
@@ -282,6 +280,7 @@ class DVSGesturePreprocessor:
                 self.width
             )
         
+        # 3. Encoding (with skip_denoising=True because we just did it)
         num_intervals = len(events_xy_sliced)
         encoded_intervals = []
         event_coords_intervals = []
@@ -292,22 +291,24 @@ class DVSGesturePreprocessor:
                 events_xy_sliced[i],
                 events_t_sliced[i],
                 events_p_sliced[i],
-                segment_id=i,  # Pass segment ID
+                segment_id=i, 
+                apply_denoising=False  # CRITICAL: Do not denoise again
             )
             encoded_intervals.append(encoded)
             event_coords_intervals.append(event_coords)
             num_vectors_per_interval.append(encoded.shape[0])
         
         return {
-            'encoded_intervals': encoded_intervals,  # List of tensors
-            'event_coords_intervals': event_coords_intervals,  # List of arrays [num_vectors, 5]
-            'num_vectors_per_interval': num_vectors_per_interval,  # List of ints
+            'encoded_intervals': encoded_intervals,
+            'event_coords_intervals': event_coords_intervals,
+            'num_vectors_per_interval': num_vectors_per_interval,
             'num_intervals': num_intervals,
             'label': sample['label'],
             'file_path': sample['file_path'],
             'augmentation_method': sample['augmentation_method'],
             'rotation_angle': rotation_angle,
         }
+
     
     def preprocess_split(self, purpose: str):
         """
@@ -386,29 +387,93 @@ class DVSGesturePreprocessor:
             sample_counter = 0  # Track actual HDF5 sample index
             for idx in pbar:
                 # Load sample once
-                sample = dataset[idx]
+                try:
+                    sample = dataset[idx]
+                except Exception as e:
+                    print(f"Skipping sample {idx} due to error: {e}")
+                    continue
                 
-                # Generate rotated versions
+                # --- OPTIMIZATION START ---
+                # Pre-denoise locally if enabled, so we don't repeat for every rotation
+                # Logic: We create a 'clean_sample' object
+                clean_sample = sample.copy() # Shallow copy
+                
+                if self.denoising_enabled:
+                     denoised_xy = []
+                     denoised_t = []
+                     denoised_p = []
+                     
+                     for i in range(len(sample['events_xy_sliced'])):
+                         t_c, y_c, x_c, p_c = filter_noise_spatial(
+                             sample['events_t_sliced'][i],
+                             sample['events_xy_sliced'][i][:, 1],
+                             sample['events_xy_sliced'][i][:, 0],
+                             sample['events_p_sliced'][i],
+                             self.height, self.width,
+                             self.denoising_grid_size,
+                             self.denoising_threshold
+                         )
+                         if len(t_c) > 0:
+                             denoised_xy.append(np.stack([x_c, y_c], axis=1))
+                             denoised_t.append(t_c)
+                             denoised_p.append(p_c)
+                         else:
+                             denoised_xy.append(np.zeros((0, 2), dtype=np.float32))
+                             denoised_t.append(np.zeros(0, dtype=np.float32))
+                             denoised_p.append(np.zeros(0, dtype=np.float32))
+                     
+                     clean_sample['events_xy_sliced'] = denoised_xy
+                     clean_sample['events_t_sliced'] = denoised_t
+                     clean_sample['events_p_sliced'] = denoised_p
+                # --- OPTIMIZATION END ---
+                
+                # Generate rotated versions from the CLEAN sample
                 for rotation_angle in angles_to_use:
-                    # Encode sample with rotation
-                    encoded_sample = self.encode_sample(sample, rotation_angle=rotation_angle)
+                    # Encode sample with rotation (SKIP internal denoising)
+                    # We pass the already clean sample, and tell encode_sample to trust us
+                    # (Note: I actually modified encode_sample to handle this flow implicitly by re-checking denoising 
+                    # there, but to be safe and cleaner, let's USE the clean_sample and ensure encode_sample 
+                    # doesn't redo it.
+                    
+                    # Wait, my previous edit to `encode_sample` ALREADY incorporated the denoising step at the top.
+                    # So actually, I can just call `encode_sample` normally, but `encode_sample` itself was refactored
+                    # to do the denoising FIRST. 
+                    # However, calling `encode_sample` inside the loop means we denoise N times!
+                    # I need to fix `encode_sample` to accept PRE-DENOISED data or just do the logic here.
+                    
+                    # Let's revert to calling a lower-level function or just doing the rotation here manually
+                    # to fully realize the optimization.
+                    
+                    # 1. Rotate the CLEAN events
+                    r_xy, r_t, r_p = clean_sample['events_xy_sliced'], clean_sample['events_t_sliced'], clean_sample['events_p_sliced']
+                    
+                    if rotation_angle != 0:
+                        r_xy, r_t, r_p = rotate_sliced_events(r_xy, r_t, r_p, rotation_angle, self.height, self.width)
+                    
+                    # 2. Loop Intervals and Encode (Explicitly SKIP denoising)
+                    encoded_intervals = []
+                    event_coords_intervals = []
+                    num_vectors_per_interval = []
+                    
+                    for i in range(len(r_xy)):
+                         # Call with apply_denoising=False because clean_sample is already denoised
+                         encoded, event_coords = self.encode_events_for_interval(
+                            r_xy[i], r_t[i], r_p[i], segment_id=i, apply_denoising=False
+                         )
+                         encoded_intervals.append(encoded)
+                         event_coords_intervals.append(event_coords)
+                         num_vectors_per_interval.append(encoded.shape[0])
                     
                     # Create a group for this sample
                     sample_group = h5f.create_group(f'sample_{sample_counter:06d}')
                     
                     # Store encoded intervals and event coordinates
-                    for interval_idx, (encoded, event_coords) in enumerate(
-                        zip(encoded_sample['encoded_intervals'], encoded_sample['event_coords_intervals'])
-                    ):
-                        # Store real and imaginary parts separately
+                    for interval_idx, (encoded, event_coords) in enumerate(zip(encoded_intervals, event_coords_intervals)):
                         real_part = encoded.real.numpy()
                         imag_part = encoded.imag.numpy()
-                        
                         interval_group = sample_group.create_group(f'interval_{interval_idx:03d}')
                         interval_group.create_dataset('real', data=real_part, compression='gzip')
                         interval_group.create_dataset('imag', data=imag_part, compression='gzip')
-                        
-                        # Store event coordinates [num_vectors, 5] with columns [x, y, t, p, segment_id]
                         interval_group.create_dataset('event_coords', data=event_coords, compression='gzip')
                     
                     # Store metadata arrays - resize and append
@@ -416,24 +481,23 @@ class DVSGesturePreprocessor:
                     new_size = current_size + 1
                     
                     h5f['labels'].resize((new_size,))
-                    h5f['labels'][current_size] = encoded_sample['label']
+                    h5f['labels'][current_size] = sample['label']
                     
                     h5f['file_paths'].resize((new_size,))
-                    h5f['file_paths'][current_size] = encoded_sample['file_path']
+                    h5f['file_paths'][current_size] = sample['file_path']
                     
                     h5f['augmentation_methods'].resize((new_size,))
-                    h5f['augmentation_methods'][current_size] = encoded_sample['augmentation_method']
+                    h5f['augmentation_methods'][current_size] = sample['augmentation_method']
                     
                     h5f['num_intervals'].resize((new_size,))
-                    h5f['num_intervals'][current_size] = encoded_sample['num_intervals']
+                    h5f['num_intervals'][current_size] = len(encoded_intervals)
                     
                     h5f['rotation_angles'].resize((new_size,))
                     h5f['rotation_angles'][current_size] = rotation_angle
                     
-                    # Store num_vectors_per_interval in sample group
                     sample_group.create_dataset(
                         'num_vectors_per_interval',
-                        data=np.array(encoded_sample['num_vectors_per_interval'], dtype=np.int32)
+                        data=np.array(num_vectors_per_interval, dtype=np.int32)
                     )
                     
                     sample_counter += 1

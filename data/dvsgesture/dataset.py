@@ -79,7 +79,17 @@ class DVSGesture(data.Dataset):
 
         # Load events from .npy file
         # Expected format: [x, y, polarity, timestamp]
-        events = np.load(file_path).astype(np.float32)
+        try:
+            events = np.load(file_path).astype(np.float32)
+        except ValueError as e:
+            print(f"ERROR LOADING FILE: {file_path}")
+            print(f"Error details: {e}")
+            # Return empty events to skip this file (will be handled by empty check below)
+            events = np.array([])
+        except Exception as e:
+            print(f"UNEXPECTED ERROR LOADING FILE: {file_path}")
+            print(f"Error details: {e}")
+            events = np.array([])
 
         if len(events) == 0:
             raise ValueError(f"Found empty events at path: {file_path}")
