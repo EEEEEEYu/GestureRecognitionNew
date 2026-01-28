@@ -149,7 +149,7 @@ PRECOMPUTING:
     # Selects queries to cover the spatial domain with kernel_size and specified overlap.
     adaptive_striding:
       kernel_size: ${PRECOMPUTING.kernel_size}  # Match encoder kernel size
-      overlap_factor: 0.5  # 0.0=Tiling, 0.5=Half-Overlap. Controls density.
+      overlap_factor: 0.6  # 0.0=Tiling, 0.5=Half-Overlap. Controls density.
     
 
 BENCHMARKING:
