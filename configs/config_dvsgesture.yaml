@@ -66,10 +66,10 @@ MODEL:
 OPTIMIZER:
   name: AdamW
   arguments:
-    lr: 1e-3
-    weight_decay: 0.05  # Increased L2 Regularization (now excludes bias/norm)
+    lr: 5e-4
+    weight_decay: 0.01  # Increased L2 Regularization (now excludes bias/norm)
   gradient_accumulation:
-    enabled: False
+    enabled: True
     scheduling: {0: 4}
   gradient_clip:
     enabled: False
@@ -126,7 +126,7 @@ PRECOMPUTING:
   # Rotation augmentation (precomputed)
   # Rotations are applied to raw events BEFORE VKM encoding to preserve geometric structure
   rotation_augmentation:
-    enabled: False
+    enabled: True
     angles: [0, 90, 180, 270]  # Cardinal rotations in degrees
     mode: separate  # Store each rotation as a separate sample (simpler dataloader)
     augment_validation: False  # Only augment training data, keep validation at 0° only
