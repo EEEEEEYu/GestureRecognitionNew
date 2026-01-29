@@ -139,7 +139,7 @@ PRECOMPUTING:
   # Use benchmark_denoising.py to find optimal parameters for your dataset
   denoising:
     enabled: True  # Set to False to disable denoising
-    grid_size: 2  # Spatial grid size for noise filtering (pixels)
+    grid_size: 5  # Spatial grid size for noise filtering (pixels)
     threshold: 6  # Minimum events per grid cell to survive filtering
   
   # Sampling strategy for query selection

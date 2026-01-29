@@ -65,6 +65,7 @@ class BidirectionalConvMambaBlock(nn.Module):
         x_c_in_reversed = x_c_in.flip(1)
         x_norm_reversed = x_norm.flip(1)
         x_s_reversed = self.ssm(x_c_in_reversed + x_norm_reversed)
+        x_s_reversed = x_s_reversed.flip(1)
         x_s = torch.cat([x_s, x_s_reversed], dim=-1)
         
         # 3. Post-SSM Conv

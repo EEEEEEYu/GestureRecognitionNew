@@ -4,7 +4,7 @@ TRAINING:
   inference_mode: False  # If this one is True, use inference
   seed: 42
   max_epochs: 100 # Increased from 50
-  label_smoothing: 0.1 # Soft targets to prevent overconfidence
+  label_smoothing: 0.00 # Soft targets to prevent overconfidence
 
 DISTRIBUTED:
   accelerator: gpu  # Changed from cpu - Mamba2 requires CUDA
@@ -63,13 +63,13 @@ MODEL:
     dropout: 0.25
     drop_path: 0.25
     use_checkpointing: True
-    use_bidirectional: False
+    use_bidirectional: True
 
 OPTIMIZER:
   name: AdamW
   arguments:
     lr: 1e-3
-    weight_decay: 0.05  # Increased L2 Regularization (now excludes bias/norm)
+    weight_decay: 0.01  # Increased L2 Regularization (now excludes bias/norm)
   gradient_accumulation:
     enabled: True
     scheduling: {0: 4}
@@ -138,8 +138,8 @@ PRECOMPUTING:
   # Use benchmark_denoising.py to find optimal parameters for your dataset
   denoising:
     enabled: True  # Set to False to disable denoising
-    grid_size: 2  # Spatial grid size for noise filtering (pixels)
-    threshold: 8  # Minimum events per grid cell to survive filtering
+    grid_size: 4  # Spatial grid size for noise filtering (pixels)
+    threshold: 4  # Minimum events per grid cell to survive filtering
   
   # Sampling strategy for query selection
   # Determines how to select which events become query vectors for VecKM encoding
