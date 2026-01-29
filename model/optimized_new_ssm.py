@@ -25,14 +25,16 @@ class BidirectionalConvMambaBlock(nn.Module):
         self.ssm = Mamba(d_model=dim, d_state=d_state, expand=expand)
         
         # 3. Post-SSM Conv
-        self.post_conv = nn.Conv1d(dim, dim, kernel_size=3, padding=1, groups=dim)
-        self.ln_post = nn.LayerNorm(dim)
+        # After bidirectional concatenation, input channels are 2*dim, output should be dim to match residual
+        self.post_conv = nn.Conv1d(dim * 2, dim, kernel_size=3, padding=1, groups=dim)
+        self.ln_post = nn.LayerNorm(dim * 2)
         self.act_post = nn.SiLU()
         
         # 4. Feed-Forward
+        # After residual connection, x has dim channels, not dim*2
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = nn.Sequential(
-            nn.Linear(dim * 2, dim * 4),
+            nn.Linear(dim, dim * 4),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(dim * 4, dim),
@@ -66,10 +68,11 @@ class BidirectionalConvMambaBlock(nn.Module):
         x_s = torch.cat([x_s, x_s_reversed], dim=-1)
         
         # 3. Post-SSM Conv
-        x_s_t = x_s.transpose(1, 2)
+        x_s_norm = self.ln_post(x_s)
+        x_s_t = x_s_norm.transpose(1, 2)
         x_out = self.post_conv(x_s_t)
         x_out = x_out.transpose(1, 2)
-        x_out = self.act_post(self.ln_post(x_out))
+        x_out = self.act_post(x_out)
         
         # Residual Connection
         x = res + self.drop_path(x_out)
