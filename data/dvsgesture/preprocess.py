@@ -28,7 +28,11 @@ sys.path.insert(0, project_root)
 from data.dvsgesture.dataset import DVSGesture
 from data.SparseVKMEncoderOptimized import VecKMSparseOptimized
 from utils.event_augmentation import rotate_sliced_events
-from utils.denoising_and_sampling import filter_noise_spatial
+from utils.denoising_and_sampling import (
+    filter_noise_spatial,
+    filter_noise_spatial_temporal,
+    filter_background_activity
+)
 
 
 class DVSGesturePreprocessor:
@@ -64,8 +68,21 @@ class DVSGesturePreprocessor:
         # Denoising configuration (applied BEFORE sampling)
         denoising_cfg = OmegaConf.select(precompute_cfg, 'denoising', default={})
         self.denoising_enabled = OmegaConf.select(denoising_cfg, 'enabled', default=False)
+        self.denoising_method = OmegaConf.select(denoising_cfg, 'method', default='spatial') # Default to spatial
+        
+        # Method 1: Spatial
         self.denoising_grid_size = int(OmegaConf.select(denoising_cfg, 'grid_size', default=4))
         self.denoising_threshold = int(OmegaConf.select(denoising_cfg, 'threshold', default=2))
+        
+        # Method 2: Spatial-Temporal
+        st_cfg = OmegaConf.select(denoising_cfg, 'spatial_temporal', default={})
+        self.st_time_window = int(OmegaConf.select(st_cfg, 'time_window', default=10000))
+        self.st_threshold = int(OmegaConf.select(st_cfg, 'threshold', default=2))
+        
+        # Method 3: BAF
+        baf_cfg = OmegaConf.select(denoising_cfg, 'baf', default={})
+        self.baf_time_threshold = int(OmegaConf.select(baf_cfg, 'time_threshold', default=1000))
+
         
         # Sampling strategy configuration (applied AFTER denoising)
         sampling_cfg = OmegaConf.select(precompute_cfg, 'sampling', default={})
@@ -80,7 +97,14 @@ class DVSGesturePreprocessor:
         print(f"Using device: {self.device}")
         print(f"Denoising: {'enabled' if self.denoising_enabled else 'disabled'}")
         if self.denoising_enabled:
-            print(f"  Grid size: {self.denoising_grid_size}, Threshold: {self.denoising_threshold}")
+            print(f"  Method: {self.denoising_method}")
+            if self.denoising_method == 'spatial':
+                print(f"  Grid size: {self.denoising_grid_size}, Threshold: {self.denoising_threshold}")
+            elif self.denoising_method == 'spatial_temporal':
+                 print(f"  Time Window: {self.st_time_window}, Threshold: {self.st_threshold}")
+            elif self.denoising_method == 'baf':
+                 print(f"  Time Threshold: {self.baf_time_threshold}")
+                 
         print(f"Sampling method: {self.sampling_method}")
         if self.sampling_method == 'random':
             print(f"  Random sampling selected (Keeping all events)")
@@ -119,6 +143,31 @@ class DVSGesturePreprocessor:
         with open(self.checkpoint_file, 'w') as f:
             json.dump(state, f, indent=2)
     
+    def _apply_denoising(self, t: np.ndarray, y: np.ndarray, x: np.ndarray, p: np.ndarray):
+        """Apply the configured denoising method."""
+        if self.denoising_method == 'spatial':
+            return filter_noise_spatial(
+                t, y, x, p,
+                self.height, self.width,
+                self.denoising_grid_size,
+                self.denoising_threshold
+            )
+        elif self.denoising_method == 'spatial_temporal':
+             return filter_noise_spatial_temporal(
+                t, y, x, p,
+                self.height, self.width,
+                grid_size=self.denoising_grid_size,
+                time_window_us=self.st_time_window,
+                threshold=self.st_threshold
+            )
+        elif self.denoising_method == 'baf':
+             return filter_background_activity(
+                t, y, x, p,
+                self.height, self.width,
+                time_threshold=self.baf_time_threshold
+            )
+        return t, y, x, p
+
     def encode_events_for_interval(
         self,
         events_xy: np.ndarray,
@@ -154,11 +203,8 @@ class DVSGesturePreprocessor:
         
         # STAGE 1: DENOISING (Optional)
         if self.denoising_enabled and apply_denoising:
-            events_t_clean, events_y_clean, events_x_clean, events_p_clean = filter_noise_spatial(
-                events_t, events_y, events_x, events_p,
-                self.height, self.width,
-                self.denoising_grid_size,
-                self.denoising_threshold
+            events_t_clean, events_y_clean, events_x_clean, events_p_clean = self._apply_denoising(
+                events_t, events_y, events_x, events_p
             )
             
             num_events_after_denoise = len(events_t_clean)
@@ -243,14 +289,11 @@ class DVSGesturePreprocessor:
              
              for i in range(len(events_xy_sliced)):
                  # Apply denoising on original coordinates
-                 t_c, y_c, x_c, p_c = filter_noise_spatial(
+                 t_c, y_c, x_c, p_c = self._apply_denoising(
                      events_t_sliced[i], 
                      events_xy_sliced[i][:, 1], 
                      events_xy_sliced[i][:, 0], 
-                     events_p_sliced[i],
-                     self.height, self.width,
-                     self.denoising_grid_size,
-                     self.denoising_threshold
+                     events_p_sliced[i]
                  )
                  # Reconstruct xy array
                  if len(t_c) > 0:

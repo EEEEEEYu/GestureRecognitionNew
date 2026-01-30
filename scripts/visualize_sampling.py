@@ -17,7 +17,11 @@ from data.HMDB_DVS.dataset import HMDB_DVS
 from data.UCF101_DVS.dataset import UCF101_DVS
 from data.dvsgesture.dataset import DVSGesture
 from utils.density_adaptive_spatial_striding import adaptive_spatial_sampling
-from utils.denoising_and_sampling import filter_noise_spatial
+from utils.denoising_and_sampling import (
+    filter_noise_spatial,
+    filter_noise_spatial_temporal,
+    filter_background_activity
+)
 
 def get_dataset_class_and_name(config_path):
     if 'hmdb' in config_path.lower():
@@ -33,18 +37,14 @@ def get_dataset_class_and_name(config_path):
 def draw_hollow_square(img, center_y, center_x, size, color):
     """Draw a hollow square on the image."""
     h, w, _ = img.shape
-    half_size = size // 2
-    
-    y_min = max(0, center_y - half_size)
-    y_max = min(h - 1, center_y + half_size)
-    x_min = max(0, center_x - half_size)
-    x_max = min(w - 1, center_x + half_size)
-    
-    # Top and Bottom
+    r = size // 2
+    x_min = max(0, center_x - r)
+    x_max = min(w - 1, center_x + r)
+    y_min = max(0, center_y - r)
+    y_max = min(h - 1, center_y + r)
+
     img[y_min, x_min:x_max+1] = color
     img[y_max, x_min:x_max+1] = color
-    
-    # Left and Right
     img[y_min:y_max+1, x_min] = color
     img[y_min:y_max+1, x_max] = color
 
@@ -52,26 +52,39 @@ def visualize_sampling(config_path, sample_idx, output_file=None, max_intervals=
     # Load config
     config = OmegaConf.load(config_path)
     precompute_cfg = config['PRECOMPUTING']
-    
+
     # Identify Dataset
     DatasetClass, dataset_name_detected = get_dataset_class_and_name(config_path)
-    
+
     # Parameters
     dataset_dir = precompute_cfg['dataset_dir']
     accumulation_interval_ms = float(precompute_cfg['accumulation_interval_ms'])
     height = int(precompute_cfg['height'])
     width = int(precompute_cfg['width'])
-    
+
     # Calculate FPS
     fps = 1000.0 / accumulation_interval_ms
     print(f"Calculated FPS: {fps} (Interval: {accumulation_interval_ms}ms)")
-    
+
     # Denoising
     denoising_cfg = OmegaConf.select(precompute_cfg, 'denoising', default={})
     denoising_enabled = OmegaConf.select(denoising_cfg, 'enabled', default=False)
+    denoising_method = OmegaConf.select(denoising_cfg, 'method', default='spatial') # Default to spatial
+
+    # Load parameters for all methods (lazy loading handled by usage)
+    # Spatial
     denoise_grid_size = int(OmegaConf.select(denoising_cfg, 'grid_size', default=4))
     denoise_threshold = int(OmegaConf.select(denoising_cfg, 'threshold', default=2))
-    
+
+    # Spatial-Temporal
+    st_cfg = OmegaConf.select(denoising_cfg, 'spatial_temporal', default={})
+    st_time_window = int(OmegaConf.select(st_cfg, 'time_window', default=10000))
+    st_threshold = int(OmegaConf.select(st_cfg, 'threshold', default=2))
+
+    # BAF
+    baf_cfg = OmegaConf.select(denoising_cfg, 'baf', default={})
+    baf_time_threshold = int(OmegaConf.select(baf_cfg, 'time_threshold', default=1000))
+
     # Sampling
     sampling_cfg = OmegaConf.select(precompute_cfg, 'sampling', default={})
     sampling_method = OmegaConf.select(sampling_cfg, 'method', default='random')
@@ -81,14 +94,25 @@ def visualize_sampling(config_path, sample_idx, output_file=None, max_intervals=
 
     # Construct dynamic filename
     if output_file is None or output_file == 'hmdb_sampling_comparison.mp4' or output_file == 'hmdb_sampling_vis.gif':
-        denoise_str = f"denoise({denoise_grid_size},{denoise_threshold})" if denoising_enabled else "no_denoise"
+        if denoising_enabled:
+            if denoising_method == 'spatial':
+                denoise_str = f"denoise_spatial({denoise_grid_size},{denoise_threshold})"
+            elif denoising_method == 'spatial_temporal':
+                denoise_str = f"denoise_st({st_time_window},{st_threshold})"
+            elif denoising_method == 'baf':
+                denoise_str = f"denoise_baf({baf_time_threshold})"
+            else:
+                 denoise_str = f"denoise_{denoising_method}"
+        else:
+            denoise_str = "no_denoise"
+
         overlap_str = f"overlap{overlap_factor}"
         output_file = f"{dataset_name_detected}_sample{sample_idx}_{denoise_str}_{overlap_str}.mp4"
-    
+
     print(f"Loading {dataset_name_detected} Dataset from {dataset_dir}...")
-    
+
     # Instantiate Dataset (Handle differences in __init__)
-    
+
     init_args = {
         'dataset_dir': dataset_dir,
         'purpose': 'train',
@@ -97,98 +121,121 @@ def visualize_sampling(config_path, sample_idx, output_file=None, max_intervals=
         'accumulation_interval_ms': accumulation_interval_ms,
         'use_flip_augmentation': False
     }
-    
+
     # Add optional args if supported
     if DatasetClass == UCF101_DVS or DatasetClass == HMDB_DVS:
-        init_args['train_split'] = 0.8 
-        
+        init_args['train_split'] = 0.8
+
     # Check if DVSGesture accepts use_flip_augmentation (it does, based on file reading)
     # Check if DVSGesture accepts accumulation_interval_ms (it does)
     # DVSGesture does NOT accept train_split
-     
+
     dataset = DatasetClass(**init_args)
-    
+
     if sample_idx >= len(dataset):
         print(f"Error: Sample index {sample_idx} out of bounds (max {len(dataset)-1})")
         return
 
     print(f"Processing sample {sample_idx}...")
     sample = dataset[sample_idx]
-    
+
     events_xy_sliced = sample['events_xy_sliced']
     events_t_sliced = sample['events_t_sliced']
     events_p_sliced = sample['events_p_sliced']
-    
+
     num_intervals = len(events_xy_sliced)
     if max_intervals is not None:
         num_intervals = min(num_intervals, max_intervals)
-    
+
     print(f"Total intervals: {len(events_xy_sliced)}, visualizing first {num_intervals}")
-    
+
     # Setup Video Writer
     # Side-by-side view: 2 * width
     vis_width = width * 2
     vis_height = height
-    
+
     # Try using cv2.VideoWriter for MP4
     # Codec: 'mp4v' or 'avc1' usually works
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_file, fourcc, fps, (vis_width, vis_height))
-    
+
     if not out.isOpened():
         print("Error: Could not create video writer with cv2. Trying 'avc1'...")
         fourcc = cv2.VideoWriter_fourcc(*'avc1')
         out = cv2.VideoWriter(output_file, fourcc, fps, (vis_width, vis_height))
-        
+
         if not out.isOpened():
             print("Error: Could not create video writer. Fallback to MJPG (avi)...")
             output_file = output_file.replace('.mp4', '.avi')
             fourcc = cv2.VideoWriter_fourcc(*'MJPG')
             out = cv2.VideoWriter(output_file, fourcc, fps, (vis_width, vis_height))
-            
+
     print(f"Writing video to {output_file}...")
-    
+
     # Statistics Collection
     stats_vectors_per_interval = []
-    
+
     for i in tqdm(range(num_intervals), desc="Generating Frames"):
         # Setup Frame canvas
         # Left: Clean, Right: Sampled
         full_frame = np.zeros((vis_height, vis_width, 3), dtype=np.uint8)
-        
+
         # Left frame ROI
         left_frame = full_frame[:, :width]
         # Right frame ROI
         right_frame = full_frame[:, width:]
-        
+
         events_xy = events_xy_sliced[i]
         events_t = events_t_sliced[i]
         events_p = events_p_sliced[i]
-        
+
         if len(events_t) == 0:
             out.write(full_frame)
             stats_vectors_per_interval.append(0)
             continue
-            
+
         # Separate X/Y
         events_x = events_xy[:, 0]
         events_y = events_xy[:, 1]
-        
+
         # Clip
         events_x = np.clip(events_x, 0, width - 1)
         events_y = np.clip(events_y, 0, height - 1)
-        
+
         # 1. Denoising
         if denoising_enabled:
-            events_t_clean, events_y_clean, events_x_clean, events_p_clean = filter_noise_spatial(
-                events_t, events_y, events_x, events_p,
-                height, width,
-                denoise_grid_size,
-                denoise_threshold
-            )
+            # Select method
+            # NOTE: For visualization, we apply denoising on the raw events for this interval.
+            # BAF and ST are batch-local here.
+
+            if denoising_method == 'spatial':
+                events_t_clean, events_y_clean, events_x_clean, events_p_clean = filter_noise_spatial(
+                    events_t, events_y, events_x, events_p,
+                    height, width,
+                    denoise_grid_size,
+                    denoise_threshold
+                )
+            elif denoising_method == 'spatial_temporal':
+                 events_t_clean, events_y_clean, events_x_clean, events_p_clean = filter_noise_spatial_temporal(
+                    events_t, events_y, events_x, events_p,
+                    height, width,
+                    grid_size=denoise_grid_size, # Reuse spatial grid size if reasonable, or use separate param?
+                    time_window_us=st_time_window,
+                    threshold=st_threshold
+                )
+            elif denoising_method == 'baf':
+                 events_t_clean, events_y_clean, events_x_clean, events_p_clean = filter_background_activity(
+                    events_t, events_y, events_x, events_p,
+                    height, width,
+                    time_threshold=baf_time_threshold
+                )
+            else:
+                # Fallback
+                events_t_clean, events_y_clean, events_x_clean, events_p_clean = events_t, events_y, events_x, events_p
+
         else:
             events_t_clean, events_y_clean, events_x_clean, events_p_clean = events_t, events_y, events_x, events_p
-            
+
         # 2. Draw Events on BOTH frames
         # Use BGR for OpenCV
         # Red: [0, 0, 255], Blue: [255, 0, 0]

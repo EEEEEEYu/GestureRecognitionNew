@@ -28,7 +28,11 @@ sys.path.insert(0, project_root)
 from data.HMDB_DVS.dataset import HMDB_DVS
 from data.SparseVKMEncoderOptimized import VecKMSparseOptimized
 from utils.event_augmentation import rotate_sliced_events
-from utils.denoising_and_sampling import filter_noise_spatial
+from utils.denoising_and_sampling import (
+    filter_noise_spatial,
+    filter_noise_spatial_temporal,
+    filter_background_activity
+)
 
 
 class HMDBPreprocessor:
@@ -64,8 +68,21 @@ class HMDBPreprocessor:
         # Denoising configuration (applied BEFORE sampling)
         denoising_cfg = OmegaConf.select(precompute_cfg, 'denoising', default={})
         self.denoising_enabled = OmegaConf.select(denoising_cfg, 'enabled', default=False)
+        self.denoising_method = OmegaConf.select(denoising_cfg, 'method', default='spatial') # Default to spatial
+        
+        # Method 1: Spatial
         self.denoising_grid_size = int(OmegaConf.select(denoising_cfg, 'grid_size', default=4))
         self.denoising_threshold = int(OmegaConf.select(denoising_cfg, 'threshold', default=2))
+        
+        # Method 2: Spatial-Temporal
+        st_cfg = OmegaConf.select(denoising_cfg, 'spatial_temporal', default={})
+        self.st_time_window = int(OmegaConf.select(st_cfg, 'time_window', default=10000))
+        self.st_threshold = int(OmegaConf.select(st_cfg, 'threshold', default=2))
+        
+        # Method 3: BAF
+        baf_cfg = OmegaConf.select(denoising_cfg, 'baf', default={})
+        self.baf_time_threshold = int(OmegaConf.select(baf_cfg, 'time_threshold', default=1000))
+
         
         # Sampling strategy configuration (applied AFTER denoising)
         sampling_cfg = OmegaConf.select(precompute_cfg, 'sampling', default={})
@@ -80,7 +97,14 @@ class HMDBPreprocessor:
         print(f"Using device: {self.device}")
         print(f"Denoising: {'enabled' if self.denoising_enabled else 'disabled'}")
         if self.denoising_enabled:
-            print(f"  Grid size: {self.denoising_grid_size}, Threshold: {self.denoising_threshold}")
+            print(f"  Method: {self.denoising_method}")
+            if self.denoising_method == 'spatial':
+                print(f"  Grid size: {self.denoising_grid_size}, Threshold: {self.denoising_threshold}")
+            elif self.denoising_method == 'spatial_temporal':
+                 print(f"  Time Window: {self.st_time_window}, Threshold: {self.st_threshold}")
+            elif self.denoising_method == 'baf':
+                 print(f"  Time Threshold: {self.baf_time_threshold}")
+                 
         print(f"Sampling method: {self.sampling_method}")
         if self.sampling_method == 'random':
             print(f"  Random sampling selected (Keeping all events)")
@@ -119,12 +143,38 @@ class HMDBPreprocessor:
         with open(self.checkpoint_file, 'w') as f:
             json.dump(state, f, indent=2)
     
+    def _apply_denoising(self, t: np.ndarray, y: np.ndarray, x: np.ndarray, p: np.ndarray):
+        """Apply the configured denoising method."""
+        if self.denoising_method == 'spatial':
+            return filter_noise_spatial(
+                t, y, x, p,
+                self.height, self.width,
+                self.denoising_grid_size,
+                self.denoising_threshold
+            )
+        elif self.denoising_method == 'spatial_temporal':
+             return filter_noise_spatial_temporal(
+                t, y, x, p,
+                self.height, self.width,
+                grid_size=self.denoising_grid_size,
+                time_window_us=self.st_time_window,
+                threshold=self.st_threshold
+            )
+        elif self.denoising_method == 'baf':
+             return filter_background_activity(
+                t, y, x, p,
+                self.height, self.width,
+                time_threshold=self.baf_time_threshold
+            )
+        return t, y, x, p
+
     def encode_events_for_interval(
         self,
         events_xy: np.ndarray,
         events_t: np.ndarray,
         events_p: np.ndarray,
         segment_id: int,
+        apply_denoising: bool = True
     ) -> Tuple[torch.Tensor, np.ndarray]:
         """
         Encode events for a single time interval using the pipeline:
@@ -137,11 +187,7 @@ class HMDBPreprocessor:
             events_t: Event timestamps [N]
             events_p: Event polarities [N]
             segment_id: Segment/interval index for this batch of events
-        
-        Returns:
-            Tuple of:
-                - Complex tensor of shape [num_vectors, encoding_dim]
-                - Event coordinates array [num_vectors, 5] with columns [x, y, t, p, segment_id]
+            apply_denoising: Whether to apply denoising (set False if already denoised)
         """
         num_events = len(events_t)
         
@@ -165,13 +211,9 @@ class HMDBPreprocessor:
         # ===================================================================
         # STAGE 1: DENOISING (Optional, Pure Numpy)
         # ===================================================================
-        if self.denoising_enabled:
-            # Apply denoising (pure numpy, no conversion)
-            events_t_clean, events_y_clean, events_x_clean, events_p_clean = filter_noise_spatial(
-                events_t, events_y, events_x, events_p,
-                self.height, self.width,
-                self.denoising_grid_size,
-                self.denoising_threshold
+        if self.denoising_enabled and apply_denoising:
+            events_t_clean, events_y_clean, events_x_clean, events_p_clean = self._apply_denoising(
+                events_t, events_y, events_x, events_p
             )
             
             num_events_after_denoise = len(events_t_clean)
@@ -262,18 +304,41 @@ class HMDBPreprocessor:
     
     def encode_sample(self, sample: Dict, rotation_angle: int = 0) -> Dict:
         """
-        Encode a single sample from DVSGesture dataset with optional rotation.
-        
-        Args:
-            sample: Dictionary containing sliced events and metadata
-            rotation_angle: Rotation angle in degrees (0, 90, 180, 270)
-        
-        Returns:
-            Dictionary containing encoded tensors, event coordinates, and metadata
+        Encode a single sample with optional rotation.
+        OPTIMIZATION: Denoises before rotation/looping if enabled.
         """
         events_xy_sliced = sample['events_xy_sliced']
         events_t_sliced = sample['events_t_sliced']
         events_p_sliced = sample['events_p_sliced']
+        
+        # 1. OPTIMIZATION: One-time Denoising (if enabled)
+        if self.denoising_enabled:
+             denoised_xy = []
+             denoised_t = []
+             denoised_p = []
+             
+             for i in range(len(events_xy_sliced)):
+                 t_c, y_c, x_c, p_c = self._apply_denoising(
+                     events_t_sliced[i], 
+                     events_xy_sliced[i][:, 1], 
+                     events_xy_sliced[i][:, 0], 
+                     events_p_sliced[i]
+                 )
+                 # Reconstruct xy array
+                 if len(t_c) > 0:
+                     xy_c = np.stack([x_c, y_c], axis=1)
+                     denoised_xy.append(xy_c)
+                     denoised_t.append(t_c)
+                     denoised_p.append(p_c)
+                 else:
+                     denoised_xy.append(np.zeros((0, 2), dtype=np.float32))
+                     denoised_t.append(np.zeros(0, dtype=np.float32))
+                     denoised_p.append(np.zeros(0, dtype=np.float32))
+             
+             # Use denoised events for rotation and encoding
+             events_xy_sliced = denoised_xy
+             events_t_sliced = denoised_t
+             events_p_sliced = denoised_p
         
         # Apply rotation if needed
         if rotation_angle != 0:
@@ -297,6 +362,7 @@ class HMDBPreprocessor:
                 events_t_sliced[i],
                 events_p_sliced[i],
                 segment_id=i,
+                apply_denoising=False # Already done at start of function
             )
             encoded_intervals.append(encoded)
             event_coords_intervals.append(event_coords)

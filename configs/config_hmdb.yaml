@@ -128,8 +128,8 @@ PRECOMPUTING:
   # Rotation augmentation (precomputed)
   # Rotations are applied to raw events BEFORE VKM encoding to preserve geometric structure
   rotation_augmentation:
-    enabled: False
-    angles: [0, 90, 180, 270]  # Cardinal rotations in degrees
+    enabled: True
+    angles: [0, 45, 135, 225, 315]  # Cardinal rotations in degrees
     mode: separate  # Store each rotation as a separate sample (simpler dataloader)
     augment_validation: False  # Only augment training data, keep validation at 0° only
   
@@ -138,8 +138,20 @@ PRECOMPUTING:
   # Use benchmark_denoising.py to find optimal parameters for your dataset
   denoising:
     enabled: True  # Set to False to disable denoising
+    method: spatial # Options: 'spatial', 'spatial_temporal', 'baf'
+    
+    # 1. Spatial Grid Denoising (Fast, standard)
     grid_size: 4  # Spatial grid size for noise filtering (pixels)
     threshold: 4  # Minimum events per grid cell to survive filtering
+    
+    # 2. Spatial-Temporal Denoising (3D Grid)
+    spatial_temporal:
+      time_window: 10000 # Temporal window in microseconds (10ms)
+      threshold: 2 # Min events in ST grid
+      
+    # 3. Background Activity Filter (BAF)
+    baf:
+      time_threshold: 2000 # Max time difference (us) between events at same pixel to be considered correlated
   
   # Sampling strategy for query selection
   # Determines how to select which events become query vectors for VecKM encoding
