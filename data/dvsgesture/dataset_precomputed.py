@@ -42,8 +42,6 @@ class Augmentor:
         cutout_size: float = 0.2,          # Size of cutout region as fraction
         
         # Temporal augmentations
-        time_scale_min: float = 1.0,       # Min time scaling factor
-        time_scale_max: float = 1.0,       # Max time scaling factor
         time_reverse_prob: float = 0.0,    # Probability of reversing temporal order
         temporal_crop_prob: float = 0.0,   # Probability of temporal cropping
         temporal_crop_min: float = 0.7,    # Min fraction of time to keep
@@ -69,8 +67,6 @@ class Augmentor:
         self.cutout_size = cutout_size
         
         # Temporal
-        self.time_scale_min = time_scale_min
-        self.time_scale_max = time_scale_max
         self.time_reverse_prob = time_reverse_prob
         self.temporal_crop_prob = temporal_crop_prob
         self.temporal_crop_min = temporal_crop_min
@@ -173,9 +169,7 @@ class Augmentor:
         # =====================================================================
         
         # 6. Temporal Scaling (speed up/slow down)
-        if self.time_scale_min != 1.0 or self.time_scale_max != 1.0:
-            scale = random.uniform(self.time_scale_min, self.time_scale_max)
-            event_coords[:, 2] *= scale
+        # REMOVED: Time scaling should be done during preprocessing
         
         # 7. Time Reversal (reverse temporal order)
         if self.time_reverse_prob > 0 and random.random() < self.time_reverse_prob:
@@ -244,11 +238,8 @@ class DVSGesturePrecomputed(data.Dataset):
         # Augmentation parameters (only applied during training)
         augmentation: dict = None,
         # Legacy parameters (for backward compatibility)
-        use_flip_augmentation: bool = False,
         aug_jitter_std: float = 0.0,
         aug_drop_rate: float = 0.0,
-        aug_time_scale_min: float = 1.0,
-        aug_time_scale_max: float = 1.0,
         # Skip samples with label 10
         skip_label_10: bool = False,
     ):
@@ -300,11 +291,9 @@ class DVSGesturePrecomputed(data.Dataset):
                 aug_params = {
                     'height': height,
                     'width': width,
-                    'flip_prob': 0.5 if use_flip_augmentation else 0.0,
+                    'flip_prob': 0.0, # Runtime flip disabled
                     'jitter_std': aug_jitter_std,
                     'drop_rate': aug_drop_rate,
-                    'time_scale_min': aug_time_scale_min,
-                    'time_scale_max': aug_time_scale_max,
                 }
             self.augmentor = Augmentor(**aug_params)
             

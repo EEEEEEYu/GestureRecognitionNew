@@ -22,13 +22,10 @@ DATA:
       height: 180
       width: 240
       num_classes: 101  # UCF101-DVS has 101 classes
-      use_flip_augmentation: False  # Random flip augmentation
       accumulation_interval_ms: 50.0  # Time interval for event accumulation
       train_split: 0.8  # 80% train, 20% validation
       aug_jitter_std: 0.5  # Coordinate jitter for augmentation
       aug_drop_rate: 0.1  # Event drop rate for augmentation
-      aug_time_scale_min: 0.8  # Minimum time scale for augmentation
-      aug_time_scale_max: 1.2  # Maximum time scale for augmentation
 
   dataloader:
     batch_size: 8  # Reduced for memory efficiency with Mamba2
@@ -133,6 +130,14 @@ PRECOMPUTING:
     mode: separate  # Store each rotation as a separate sample (simpler dataloader)
     augment_validation: False  # Only augment training data, keep validation at 0° only
   
+  # Time Scaling augmentation (precomputed)
+  # Scales time dimension and re-slices.
+  # Applied independently of rotation (No Cartesian product with rotation, i.e. Rotation 0 for these)
+  time_scaling_augmentation:
+    enabled: True
+    scales: [0.8, 0.9, 1.1, 1.2]
+    augment_validation: False
+  
   
   # Denoising parameters (applied BEFORE sampling)
   # Use benchmark_denoising.py to find optimal parameters for your dataset
@@ -163,7 +168,7 @@ PRECOMPUTING:
     # Selects queries to cover the spatial domain with kernel_size and specified overlap.
     adaptive_striding:
       kernel_size: ${PRECOMPUTING.kernel_size}  # Match encoder kernel size
-      overlap_factor: 0.75  # 0.0=Tiling, 0.5=Half-Overlap. Controls density.
+      overlap_factor: 0.6  # 0.0=Tiling, 0.5=Half-Overlap. Controls density.
     
 
 BENCHMARKING:

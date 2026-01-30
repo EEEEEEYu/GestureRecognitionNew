@@ -22,13 +22,9 @@ DATA:
       height: 128
       width: 128
       num_classes: 11  # DVSGesture has 11 classes
-      # Second-stage downsampling (training-time augmentation)
-      use_flip_augmentation: True # Enabled for better generalization
       # Robustness Augmentations
-      aug_jitter_std: 0.5       # Coordinate Jitter (pixels/time). Moderate strength.
-      aug_drop_rate: 0.1        # Event Drop Rate (10%). Moderate strength.
-      aug_time_scale_min: 0.8   # Temporal Scaling Min (20% faster).
-      aug_time_scale_max: 1.2   # Temporal Scaling Max (20% slower).
+      aug_jitter_std: 0.25       # Coordinate Jitter (pixels/time). Moderate strength.
+      aug_drop_rate: 0.05        # Event Drop Rate (10%). Moderate strength.
       skip_label_10: True
 
   dataloader:
@@ -56,7 +52,7 @@ MODEL:
     intra_window_d_state: 32
     inter_window_d_state: 16
     intra_window_expand: 2
-    inter_window_expand: 2  # Must be integer for Mamba2
+    inter_window_expand: 2
     intra_window_kernel_size: 11
     inter_window_kernel_size: 5
     intra_window_padding: 5
@@ -67,7 +63,7 @@ MODEL:
     use_bidirectional: True
 
 OPTIMIZER:
-  name: NAdam
+  name: AdamW
   arguments:
     lr: 1e-3
     weight_decay: 0.01  # Increased L2 Regularization (now excludes bias/norm)
@@ -133,6 +129,14 @@ PRECOMPUTING:
     angles: [0, 45, 135, 225, 315]  # Cardinal rotations in degrees
     mode: separate  # Store each rotation as a separate sample (simpler dataloader)
     augment_validation: False  # Only augment training data, keep validation at 0° only
+  
+  # Time Scaling augmentation (precomputed)
+  # Scales time dimension and re-slices.
+  # Applied independently of rotation (No Cartesian product with rotation, i.e. Rotation 0 for these)
+  time_scaling_augmentation:
+    enabled: True
+    scales: [0.8, 0.9, 1.1, 1.2]
+    augment_validation: False
   
   
   # Denoising parameters (applied BEFORE sampling)

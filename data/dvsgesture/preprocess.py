@@ -27,7 +27,7 @@ sys.path.insert(0, project_root)
 
 from data.dvsgesture.dataset import DVSGesture
 from data.SparseVKMEncoderOptimized import VecKMSparseOptimized
-from utils.event_augmentation import rotate_sliced_events
+from utils.event_augmentation import rotate_sliced_events, scale_time_sliced_events
 from utils.denoising_and_sampling import (
     filter_noise_spatial,
     filter_noise_spatial_temporal,
@@ -64,6 +64,12 @@ class DVSGesturePreprocessor:
         self.rotation_angles = OmegaConf.select(rotation_cfg, 'angles', default=[0])
         self.rotation_mode = OmegaConf.select(rotation_cfg, 'mode', default='separate')
         self.augment_validation = OmegaConf.select(rotation_cfg, 'augment_validation', default=False)
+        
+        # Time Scaling configuration
+        time_scaling_cfg = OmegaConf.select(precompute_cfg, 'time_scaling_augmentation', default={})
+        self.time_scaling_enabled = OmegaConf.select(time_scaling_cfg, 'enabled', default=False)
+        self.time_scales = OmegaConf.select(time_scaling_cfg, 'scales', default=[1.0])
+        self.time_scaling_augment_validation = OmegaConf.select(time_scaling_cfg, 'augment_validation', default=False)
         
         # Denoising configuration (applied BEFORE sampling)
         denoising_cfg = OmegaConf.select(precompute_cfg, 'denoising', default={})
@@ -406,6 +412,7 @@ class DVSGesturePreprocessor:
                 h5f.create_dataset('augmentation_methods', shape=(0,), maxshape=(None,), dtype=h5py.string_dtype())
                 h5f.create_dataset('num_intervals', shape=(0,), maxshape=(None,), dtype=np.int32)
                 h5f.create_dataset('rotation_angles', shape=(0,), maxshape=(None,), dtype=np.int32)
+                h5f.create_dataset('time_scale_factors', shape=(0,), maxshape=(None,), dtype=np.float32)
                 
                 # Store metadata
                 h5f.attrs['accumulation_interval_ms'] = self.accumulation_interval_ms
@@ -427,7 +434,12 @@ class DVSGesturePreprocessor:
             # Process samples
             pbar = tqdm(range(processed_samples, total_samples), desc=f"Processing {purpose}")
             
-            sample_counter = 0  # Track actual HDF5 sample index
+            # Track actual HDF5 sample index based on existing data
+            if processed_samples > 0 and 'labels' in h5f:
+                sample_counter = h5f['labels'].shape[0]
+            else:
+                sample_counter = 0
+
             for idx in pbar:
                 # Load sample once
                 try:
@@ -470,30 +482,39 @@ class DVSGesturePreprocessor:
                      clean_sample['events_p_sliced'] = denoised_p
                 # --- OPTIMIZATION END ---
                 
-                # Generate rotated versions from the CLEAN sample
-                for rotation_angle in angles_to_use:
-                    # Encode sample with rotation (SKIP internal denoising)
-                    # We pass the already clean sample, and tell encode_sample to trust us
-                    # (Note: I actually modified encode_sample to handle this flow implicitly by re-checking denoising 
-                    # there, but to be safe and cleaner, let's USE the clean_sample and ensure encode_sample 
-                    # doesn't redo it.
+                # Generate augmented versions (rotation and time scaling) from CLEAN sample
+                samples_to_process = []
+                
+                # 1. Rotation Augmentations (with Scale=1.0)
+                for angle in angles_to_use:
+                    samples_to_process.append({'angle': angle, 'scale': 1.0})
                     
-                    # Wait, my previous edit to `encode_sample` ALREADY incorporated the denoising step at the top.
-                    # So actually, I can just call `encode_sample` normally, but `encode_sample` itself was refactored
-                    # to do the denoising FIRST. 
-                    # However, calling `encode_sample` inside the loop means we denoise N times!
-                    # I need to fix `encode_sample` to accept PRE-DENOISED data or just do the logic here.
+                # 2. Time Scaling Augmentations (with Angle=0)
+                if self.time_scaling_enabled and (purpose == 'train' or self.time_scaling_augment_validation):
+                    for scale in self.time_scales:
+                        if scale == 1.0: continue # Already covered by Angle 0 in Rotations loop
+                        samples_to_process.append({'angle': 0, 'scale': scale})
+
+                for params in samples_to_process:
+                    rotation_angle = params['angle']
+                    time_scale = params['scale']
                     
-                    # Let's revert to calling a lower-level function or just doing the rotation here manually
-                    # to fully realize the optimization.
-                    
-                    # 1. Rotate the CLEAN events
+                    # 1. Start with CLEAN events
                     r_xy, r_t, r_p = clean_sample['events_xy_sliced'], clean_sample['events_t_sliced'], clean_sample['events_p_sliced']
                     
+                    # 2. Apply Time Scaling if needed
+                    if time_scale != 1.0:
+                        r_xy, r_t, r_p = scale_time_sliced_events(
+                            r_xy, r_t, r_p,
+                            scale_factor=time_scale,
+                            accumulation_interval_ms=self.accumulation_interval_ms
+                        )
+                    
+                    # 3. Apply Rotation if needed
                     if rotation_angle != 0:
                         r_xy, r_t, r_p = rotate_sliced_events(r_xy, r_t, r_p, rotation_angle, self.height, self.width)
                     
-                    # 2. Loop Intervals and Encode (Explicitly SKIP denoising)
+                    # 4. Loop Intervals and Encode (Explicitly SKIP denoising)
                     encoded_intervals = []
                     event_coords_intervals = []
                     num_vectors_per_interval = []
@@ -508,7 +529,14 @@ class DVSGesturePreprocessor:
                          num_vectors_per_interval.append(encoded.shape[0])
                     
                     # Create a group for this sample
-                    sample_group = h5f.create_group(f'sample_{sample_counter:06d}')
+                    group_name = f'sample_{sample_counter:06d}'
+                    if group_name in h5f:
+                        # If the group exists while appending, it might be a left-over from a crashed run
+                        # that didn't get added to the 'labels' dataset. We should overwrite it.
+                        print(f"Warning: Group {group_name} already exists. Deleting likely incomplete group...")
+                        del h5f[group_name]
+                        
+                    sample_group = h5f.create_group(group_name)
                     
                     # Store encoded intervals and event coordinates
                     for interval_idx, (encoded, event_coords) in enumerate(zip(encoded_intervals, event_coords_intervals)):
@@ -537,6 +565,9 @@ class DVSGesturePreprocessor:
                     
                     h5f['rotation_angles'].resize((new_size,))
                     h5f['rotation_angles'][current_size] = rotation_angle
+                    
+                    h5f['time_scale_factors'].resize((new_size,))
+                    h5f['time_scale_factors'][current_size] = time_scale
                     
                     sample_group.create_dataset(
                         'num_vectors_per_interval',

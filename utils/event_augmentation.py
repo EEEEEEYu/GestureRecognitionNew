@@ -288,3 +288,75 @@ def rotate_events_arbitrary(
     coords_rotated[:, 1] = np.clip(coords_rotated[:, 1], 0, height - 1)
     
     return coords_rotated, events_t.copy(), events_p.copy()
+
+
+def scale_time_sliced_events(
+    events_xy_sliced: list,
+    events_t_sliced: list,
+    events_p_sliced: list,
+    scale_factor: float,
+    accumulation_interval_ms: float
+) -> Tuple[list, list, list]:
+    """
+    Apply time scaling to sliced events.
+    
+    This function:
+    1. Flattens the sliced events into a continuous stream.
+    2. Scales the timestamps by scale_factor (t_new = t_old * scale).
+    3. Re-slices the events into intervals based on the fixed accumulation_interval_ms.
+    
+    Args:
+        events_xy_sliced: List of event coordinate arrays
+        events_t_sliced: List of event timestamp arrays
+        events_p_sliced: List of event polarity arrays
+        scale_factor: Scaling factor (e.g. 1.1 for slowing down, 0.9 for speeding up)
+        accumulation_interval_ms: The fixed size of one time bin in milliseconds
+        
+    Returns:
+        Tuple of (new_xy_sliced, new_t_sliced, new_p_sliced)
+    """
+    if scale_factor == 1.0 or scale_factor <= 0:
+         return events_xy_sliced, events_t_sliced, events_p_sliced
+
+    # 1. Flatten
+    if len(events_t_sliced) == 0:
+        return events_xy_sliced, events_t_sliced, events_p_sliced
+        
+    all_xy = np.concatenate(events_xy_sliced, axis=0)
+    all_t = np.concatenate(events_t_sliced, axis=0)
+    all_p = np.concatenate(events_p_sliced, axis=0)
+    
+    if len(all_t) == 0:
+        return events_xy_sliced, events_t_sliced, events_p_sliced
+        
+    t_start = all_t[0]
+    all_t_rel = all_t - t_start
+    
+    # 2. Scale
+    all_t_scaled = all_t_rel * scale_factor
+    all_t_new = all_t_scaled + t_start
+    
+    # 3. Re-slice
+    interval_us = accumulation_interval_ms * 1000.0
+    
+    # Boundaries: t_start, t_start+dt, t_start+2dt, ...
+    # Determine end time
+    t_end = all_t_new[-1]
+    
+    boundaries = np.arange(t_start, t_end + interval_us, interval_us)
+    indices = np.searchsorted(all_t_new, boundaries)
+    
+    new_xy_sliced = []
+    new_t_sliced = []
+    new_p_sliced = []
+    
+    for i in range(len(indices) - 1):
+        idx0 = indices[i]
+        idx1 = indices[i+1]
+        
+        if idx1 > idx0:
+            new_xy_sliced.append(all_xy[idx0:idx1])
+            new_t_sliced.append(all_t_new[idx0:idx1])
+            new_p_sliced.append(all_p[idx0:idx1])
+            
+    return new_xy_sliced, new_t_sliced, new_p_sliced

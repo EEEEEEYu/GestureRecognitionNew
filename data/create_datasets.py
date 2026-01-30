@@ -40,16 +40,12 @@ def create_dvsgesture_datasets(config: Dict, purposes: list = ['train', 'validat
     precomputed_dir = dataset_config['precomputed_dir']
     height = dataset_config.get('height', 128)
     width = dataset_config.get('width', 128)
-    use_flip_augmentation = dataset_config.get('use_flip_augmentation', False)
-
-    
     datasets = {}
     
     for purpose in purposes:
         datasets[purpose] = DVSGesturePrecomputed(
             precomputed_dir=precomputed_dir,
             purpose=purpose,
-            use_flip_augmentation=use_flip_augmentation if purpose == 'train' else False,
             height=height,
             width=width,
         )

@@ -23,14 +23,10 @@ class Augmentor:
     def __init__(
         self, 
         jitter_std: float = 0.0,
-        drop_rate: float = 0.0,
-        time_scale_min: float = 1.0,
-        time_scale_max: float = 1.0
+        drop_rate: float = 0.0
     ):
         self.jitter_std = jitter_std
         self.drop_rate = drop_rate
-        self.time_scale_min = time_scale_min
-        self.time_scale_max = time_scale_max
         
     def __call__(self, vectors: torch.Tensor, event_coords: np.ndarray) -> Tuple[torch.Tensor, np.ndarray]:
         """
@@ -45,13 +41,6 @@ class Augmentor:
         """
         if len(vectors) == 0:
             return vectors, event_coords
-            
-        # 1. Temporal Scaling (Traveral Speed Augmentation)
-        # Scales the 't' coordinate, which affects relative temporal ordering sorting
-        if self.time_scale_min != 1.0 or self.time_scale_max != 1.0:
-            scale = random.uniform(self.time_scale_min, self.time_scale_max)
-            # t is at index 2
-            event_coords[:, 2] *= scale
             
         # 2. Coordinate Jittering (Traversal Order Augmentation)
         # Adds noise to x,y,t to perturb Hilbert curve sorting order
@@ -82,11 +71,8 @@ class HMDB_DVS_Precomputed(data.Dataset):
         self,
         dataset_dir: str,  # This should be the precomputed data directory
         purpose: str = 'train',
-        use_flip_augmentation: bool = False,
         aug_jitter_std: float = 0.0,
         aug_drop_rate: float = 0.0,
-        aug_time_scale_min: float = 1.0,
-        aug_time_scale_max: float = 1.0,
         height: int = 180,
         width: int = 240,
         num_classes: int = 51,
@@ -110,7 +96,6 @@ class HMDB_DVS_Precomputed(data.Dataset):
         
         self.dataset_dir = dataset_dir
         self.purpose = purpose
-        self.use_flip_augmentation = use_flip_augmentation
         self.num_classes = num_classes
         
         # Initialize augmenter for training
@@ -118,9 +103,7 @@ class HMDB_DVS_Precomputed(data.Dataset):
         if purpose == 'train':
             self.augmentor = Augmentor(
                 jitter_std=aug_jitter_std,
-                drop_rate=aug_drop_rate,
-                time_scale_min=aug_time_scale_min,
-                time_scale_max=aug_time_scale_max
+                drop_rate=aug_drop_rate
             )
             
         self.height = height

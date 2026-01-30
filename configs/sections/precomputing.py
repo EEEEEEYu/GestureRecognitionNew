@@ -39,5 +39,6 @@ class PrecomputingConfig:
     
     # Optional sections (used in preprocessing)
     rotation_augmentation: Optional[Dict[str, Any]] = None
+    time_scaling_augmentation: Optional[Dict[str, Any]] = None
     denoising: Optional[Dict[str, Any]] = None
     sampling: Optional[Dict[str, Any]] = None
