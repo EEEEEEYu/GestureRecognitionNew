@@ -79,73 +79,6 @@ class BidirectionalConvMambaBlock(nn.Module):
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
-class ConvMambaBlock(nn.Module):
-    """
-    Optimized Building Block: 
-    1. x = x + DropPath(Mixer(Norm(x)))
-    2. x = x + DropPath(MLP(Norm(x)))
-    Designed for variable-length sequences [B, L, D].
-    """
-    def __init__(self, dim, d_state=32, expand=2, dropout=0.1, drop_path=0.1, kernel_size=3, padding=1):
-        super().__init__()
-        self.norm1 = nn.RMSNorm(dim)
-        
-        # 1. Depthwise Conv to enhance local features (spatial/temporal jitters)
-        self.local_conv = nn.Conv1d(dim, dim, kernel_size=kernel_size, padding=padding, groups=dim)
-        self.ln_conv = nn.LayerNorm(dim)
-        self.act1 = nn.SiLU()
-        
-        # 2. SSM
-        self.ssm = Mamba(d_model=dim, d_state=d_state, expand=expand)
-        
-        # 3. Post-SSM Conv
-        self.post_conv = nn.Conv1d(dim, dim, kernel_size=3, padding=1, groups=dim)
-        self.ln_post = nn.LayerNorm(dim)
-        self.act_post = nn.SiLU()
-        
-        # 4. Feed-Forward
-        self.norm2 = nn.RMSNorm(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, dim * 4),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(dim * 4, dim),
-            nn.Dropout(dropout)
-        )
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-
-    def forward(self, x):
-        # x: [B, L, D] (Channel Last)
-        
-        # --- Branch 1: Mixer (Conv + SSM + PostConv) ---
-        residual = x
-        x_norm = self.norm1(x)
-        
-        # 1. Local Conv: [B, L, D] -> [B, D, L]
-        x_t = x_norm.transpose(1, 2)
-        x_c = self.local_conv(x_t)
-        x_c = x_c.transpose(1, 2)
-        x_c = self.act1(self.ln_conv(x_c)) 
-        
-        x_c_in = x_c.contiguous()
-        
-        # 2. Global SSM
-        # Research-backed: Should we add 'x' (residual) here? 
-        # Current plan: Remove 'x' input to SSM to let Conv features dominate.
-        x_s = self.ssm(x_c_in + x_norm)
-        
-        # 3. Post-SSM Conv
-        x_s_t = x_s.transpose(1, 2)
-        x_out = self.post_conv(x_s_t)
-        x_out = x_out.transpose(1, 2)
-        x_out = self.act_post(self.ln_post(x_out))
-        
-        # Residual connection for Mixer
-        x = residual + self.drop_path(x_out)
-        
-        # --- Branch 2: Feed-Forward ---
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x
 
 class NestedEventMamba(nn.Module):
     def __init__(
@@ -165,8 +98,7 @@ class NestedEventMamba(nn.Module):
         inter_window_padding=1,
         dropout=0.1, 
         drop_path=0.1,
-        use_checkpointing=False,
-        use_bidirectional=False
+        use_checkpointing=False
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -181,32 +113,33 @@ class NestedEventMamba(nn.Module):
         
         # --- Level 1: Intra-Window Shared Blocks ---
         # These process N events within a single segment.
-        if use_bidirectional:
-            self.intra_window_blocks = nn.ModuleList([
-                BidirectionalConvMambaBlock(hidden_dim, d_state=intra_window_d_state, expand=intra_window_expand, dropout=dropout, drop_path=drop_path, kernel_size=intra_window_kernel_size, padding=intra_window_padding) for _ in range(intra_window_blocks)
-            ])
-        else:
-            self.intra_window_blocks = nn.ModuleList([
-                ConvMambaBlock(hidden_dim, d_state=intra_window_d_state, expand=intra_window_expand, dropout=dropout, drop_path=drop_path, kernel_size=intra_window_kernel_size, padding=intra_window_padding) for _ in range(intra_window_blocks)
-            ])
+        self.intra_window_blocks = nn.ModuleList()
+        # Scale dropout from 50% of original value to 100% of original value
+        original_drop_path = drop_path
+        original_dropout = dropout
+        for i in range(intra_window_blocks):
+            drop_path = original_drop_path * (0.5 + i / intra_window_blocks * 0.5)
+            dropout = original_dropout * (0.5 + i / intra_window_blocks * 0.5)
+            self.intra_window_blocks.append(BidirectionalConvMambaBlock(hidden_dim, d_state=intra_window_d_state, expand=intra_window_expand, dropout=dropout, drop_path=drop_path, kernel_size=intra_window_kernel_size, padding=intra_window_padding))
         
         # --- Level 2: Inter-Window (Temporal) Blocks ---
         # These process T segments across the whole sequence.
-        if use_bidirectional:
-            self.inter_window_blocks = nn.ModuleList([
-                BidirectionalConvMambaBlock(hidden_dim, d_state=inter_window_d_state, expand=inter_window_expand, dropout=dropout, drop_path=drop_path, kernel_size=inter_window_kernel_size, padding=inter_window_padding) for _ in range(inter_window_blocks)
-            ])
-        else:
-            self.inter_window_blocks = nn.ModuleList([
-                ConvMambaBlock(hidden_dim, d_state=inter_window_d_state, expand=inter_window_expand, dropout=dropout, drop_path=drop_path, kernel_size=inter_window_kernel_size, padding=inter_window_padding) for _ in range(inter_window_blocks)
-            ])
+        self.inter_window_blocks = nn.ModuleList()
+        # Scale dropout from 50% of original value to 100% of original value
+        original_drop_path = drop_path
+        original_dropout = dropout
+        for i in range(inter_window_blocks):
+            drop_path = original_drop_path * (0.5 + i / inter_window_blocks * 0.5)
+            dropout = original_dropout * (0.5 + i / inter_window_blocks * 0.5)
+            self.inter_window_blocks.append(BidirectionalConvMambaBlock(hidden_dim, d_state=inter_window_d_state, expand=inter_window_expand, dropout=dropout, drop_path=drop_path, kernel_size=inter_window_kernel_size, padding=inter_window_padding))
+
         
         # Learned Temporal Pooling Projection
         self.pool_proj = nn.Linear(hidden_dim, 1)
         
         self.head = nn.Sequential(
             nn.LayerNorm(hidden_dim),
-            nn.Dropout(0.3),
+            nn.Dropout(0.15),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.GELU(),
             nn.Linear(hidden_dim // 2, num_classes)
