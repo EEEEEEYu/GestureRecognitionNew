@@ -164,10 +164,18 @@ class ModelInterface(pl.LightningModule):
         whitelist_weight_modules = (torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)
         blacklist_weight_modules = (torch.nn.LayerNorm, torch.nn.GroupNorm, torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d, torch.nn.Embedding)
         
+        # Load model-specific no_weight_decay parameters
+        if hasattr(self.model, 'no_weight_decay'):
+            no_decay.update(self.model.no_weight_decay)
+
         for mn, m in self.model.named_modules():
             for pn, p in m.named_parameters():
                 fpn = '%s.%s' % (mn, pn) if mn else pn # full param name
                 
+                # Check if this parameter is already explicity excluded
+                if fpn in no_decay:
+                    continue
+
                 if pn.endswith('bias'):
                     # all biases will not be decayed
                     no_decay.add(fpn)
@@ -176,12 +184,6 @@ class ModelInterface(pl.LightningModule):
                     decay.add(fpn)
                 elif pn.endswith('weight') and isinstance(m, blacklist_weight_modules):
                     # weights of blacklist modules will NOT be weight decayed
-                    no_decay.add(fpn)
-                
-                # Special cases for Mamba parameters
-                # A_log, D are specific to SSMs and usually shouldn't be decayed or have special rules
-                # For simplicity here, we stick to standard rules: only standard weights get decay
-                elif 'A_log' in pn or 'D' in pn:
                     no_decay.add(fpn)
         
         # Validate that we considered every parameter
